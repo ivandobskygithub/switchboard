@@ -157,10 +157,13 @@ let TERMINAL_THEME = getTerminalTheme();
 // --- Terminal key handler: send modifier+key combos as kitty protocol sequences ---
 function attachTerminalKeyHandler(terminal, getSessionId) {
   terminal.attachCustomKeyEventHandler((e) => {
-    if (e.type !== 'keydown') return true;
     // Shift+Enter → kitty protocol: CSI 13 ; 2 u
+    // Must return false for ALL event types (keydown, keypress, keyup) to prevent
+    // the keypress handler from also sending \r through onData
     if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      window.api.sendInput(getSessionId(), '\x1b[13;2u');
+      if (e.type === 'keydown') {
+        window.api.sendInput(getSessionId(), '\x1b[13;2u');
+      }
       return false;
     }
     return true;
@@ -1017,6 +1020,8 @@ function rebindSidebarEvents(projects) {
         e.stopPropagation();
         const sessions = project.sessions.filter(s => !s.archived);
         if (sessions.length === 0) return;
+        const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+        if (!confirm(`Archive all ${sessions.length} session${sessions.length > 1 ? 's' : ''} in ${shortName}?`)) return;
         for (const s of sessions) {
           if (activePtyIds.has(s.sessionId)) {
             await window.api.stopSession(s.sessionId);
