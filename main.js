@@ -9,6 +9,7 @@ const log = require('electron-log');
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
 const { fetchAndTransformUsage } = require('./claude-auth');
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
+const { buildClaudeCmd } = require('./claude-cmd');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -1067,49 +1068,19 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         }
       }, 300);
     } else {
-      // Build claude command with session options
-      let claudeCmd;
-      if (sessionOptions?.forkFrom) {
-        claudeCmd = `claude --resume "${sessionOptions.forkFrom}" --fork-session`;
-      } else if (isNew) {
-        claudeCmd = `claude --session-id "${sessionId}"`;
-      } else {
-        claudeCmd = `claude --resume "${sessionId}"`;
-      }
-
-      if (sessionOptions) {
-        if (sessionOptions.dangerouslySkipPermissions) {
-          claudeCmd += ' --dangerously-skip-permissions';
-        } else if (sessionOptions.permissionMode) {
-          claudeCmd += ` --permission-mode "${sessionOptions.permissionMode}"`;
-        }
-        if (sessionOptions.worktree) {
-          claudeCmd += ' --worktree';
-          if (sessionOptions.worktreeName) {
-            claudeCmd += ` "${sessionOptions.worktreeName}"`;
-          }
-        }
-        if (sessionOptions.chrome) {
-          claudeCmd += ' --chrome';
-        }
-        if (sessionOptions.addDirs) {
-          const dirs = sessionOptions.addDirs.split(',').map(d => d.trim()).filter(Boolean);
-          for (const dir of dirs) {
-            claudeCmd += ` --add-dir "${dir}"`;
-          }
-        }
-      }
-
+      // Build claude command. All validation & shell-escaping lives in
+      // claude-cmd.js for test coverage.
+      let tmpPrompt = null;
       if (sessionOptions?.appendSystemPrompt) {
-        // Write to a temp file and use shell substitution to avoid quoting issues
-        const tmpPrompt = path.join(os.tmpdir(), `switchboard-prompt-${sessionId}.md`);
+        tmpPrompt = path.join(os.tmpdir(), `switchboard-prompt-${sessionId}.md`);
         fs.writeFileSync(tmpPrompt, sessionOptions.appendSystemPrompt);
-        claudeCmd += ` --append-system-prompt "$(cat '${tmpPrompt}')"`;
       }
-
-      if (sessionOptions?.preLaunchCmd) {
-        claudeCmd = sessionOptions.preLaunchCmd + ' ' + claudeCmd;
+      const built = buildClaudeCmd({ sessionId, isNew, sessionOptions, tmpPromptPath: tmpPrompt });
+      if (!built.ok) {
+        if (tmpPrompt) { try { fs.unlinkSync(tmpPrompt); } catch {} }
+        return built;
       }
+      let claudeCmd = built.cmd;
 
       // Start MCP server for this session so Claude CLI sends diffs/file opens to Switchboard
       // (skip if user disabled IDE emulation in global settings)
