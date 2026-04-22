@@ -1,0 +1,14 @@
+{
+  "$schema": "./branding.schema.json",
+  "productName": "Switchboard",
+  "appId": "ai.doctly.switchboard",
+  "windowTitle": "Switchboard",
+  "mcpIdeName": "Switchboard",
+  "tmpFilePrefix": "switchboard",
+  "support": "support@doctly.ai",
+  "publish": {
+    "provider": "github",
+    "owner": "doctly",
+    "repo": "switchboard"
+  }
+}

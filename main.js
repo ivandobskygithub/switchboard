@@ -10,6 +10,7 @@ const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolveP
 const { fetchAndTransformUsage } = require('./claude-auth');
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
 const { buildClaudeCmd } = require('./claude-cmd');
+const branding = require('./branding');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -163,7 +164,7 @@ function createWindow() {
     ...bounds,
     minWidth: 800,
     minHeight: 500,
-    title: 'Switchboard',
+    title: branding.windowTitle,
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1113,7 +1114,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       // claude-cmd.js for test coverage.
       let tmpPrompt = null;
       if (sessionOptions?.appendSystemPrompt) {
-        tmpPrompt = path.join(os.tmpdir(), `switchboard-prompt-${sessionId}.md`);
+        tmpPrompt = path.join(os.tmpdir(), `${branding.tmpFilePrefix}-prompt-${sessionId}.md`);
         fs.writeFileSync(tmpPrompt, sessionOptions.appendSystemPrompt);
       }
       const built = buildClaudeCmd({ sessionId, isNew, sessionOptions, tmpPromptPath: tmpPrompt });
