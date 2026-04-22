@@ -334,6 +334,8 @@ async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
     authToken,
   });
   fs.writeFileSync(lockFilePath, lockData, 'utf8');
+  // Tighten permissions so other local users cannot read the auth token.
+  try { fs.chmodSync(lockFilePath, 0o600); } catch {}
 
   const entry = {
     sessionId,
@@ -347,9 +349,21 @@ async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
   };
 
   wss.on('connection', (ws, req) => {
-    // Validate auth
-    const headerAuth = req.headers['x-claude-code-ide-authorization'];
-    if (headerAuth !== authToken) {
+    // Reject browser connections — MCP clients never send an Origin header.
+    if (req.headers.origin) {
+      log.warn(`[mcp] session=${sessionId} rejected connection: origin header present (${req.headers.origin})`);
+      ws.close(4003, 'Origin not allowed');
+      return;
+    }
+    // Validate auth in constant time.
+    const headerAuth = req.headers['x-claude-code-ide-authorization'] || '';
+    let ok = false;
+    try {
+      const a = Buffer.from(String(headerAuth));
+      const b = Buffer.from(authToken);
+      ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch { ok = false; }
+    if (!ok) {
       log.warn(`[mcp] session=${sessionId} rejected connection: bad auth`);
       ws.close(4001, 'Unauthorized');
       return;
