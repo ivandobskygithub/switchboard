@@ -18,7 +18,8 @@ if (!app.isPackaged) {
 }
 
 // Clean env for child processes — strip Electron internals that cause nested
-// Electron apps (or node-pty inside them) to malfunction.
+// Electron apps (or node-pty inside them) to malfunction. ANTHROPIC_* and
+// CLAUDE_* pass through so users with a private endpoint and token keep them.
 const cleanPtyEnv = Object.fromEntries(
   Object.entries(process.env).filter(([k]) =>
     !k.startsWith('ELECTRON_') &&
@@ -28,6 +29,46 @@ const cleanPtyEnv = Object.fromEntries(
     k !== 'WT_SESSION'
   )
 );
+
+// IPC: re-read a whitelist of env vars from the user's login shell rc file.
+// Used when the user rotates their Anthropic token in ~/.zshrc and wants
+// newly-spawned sessions (and the updater) to pick it up without restarting.
+const ENV_RELOAD_WHITELIST = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'];
+ipcMain.handle('reload-shell-env', async () => {
+  if (process.platform === 'win32') {
+    return { ok: false, error: 'reload-shell-env is unix-only' };
+  }
+  try {
+    const { execFileSync } = require('child_process');
+    const shellPath = process.env.SHELL || '/bin/zsh';
+    // Run the interactive login shell and print the whitelisted vars in a
+    // NUL-separated KEY=VALUE form. No shell metacharacters are passed in.
+    const script = ENV_RELOAD_WHITELIST.map(k => `printf '%s=%s\\0' ${k} "$${k}"`).join('; ');
+    const out = execFileSync(shellPath, ['-l', '-i', '-c', script], {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const updated = {};
+    for (const pair of out.split('\0')) {
+      if (!pair) continue;
+      const idx = pair.indexOf('=');
+      if (idx <= 0) continue;
+      const k = pair.slice(0, idx);
+      const v = pair.slice(idx + 1);
+      if (!ENV_RELOAD_WHITELIST.includes(k)) continue;
+      if (v) {
+        process.env[k] = v;
+        cleanPtyEnv[k] = v;
+        updated[k] = true;
+      } else {
+        delete process.env[k];
+        delete cleanPtyEnv[k];
+      }
+    }
+    return { ok: true, reloaded: Object.keys(updated) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 // Shell profiles → shell-profiles.js
 const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs } = require('./shell-profiles');

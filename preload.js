@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   getMemories: () => ipcRenderer.invoke('get-memories'),
   readMemory: (filePath) => ipcRenderer.invoke('read-memory', filePath),
   saveMemory: (filePath, content) => ipcRenderer.invoke('save-memory', filePath, content),
+  reloadShellEnv: () => ipcRenderer.invoke('reload-shell-env'),
   getProjects: (showArchived) => ipcRenderer.invoke('get-projects', showArchived),
   getActiveSessions: () => ipcRenderer.invoke('get-active-sessions'),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),

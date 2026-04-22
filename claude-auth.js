@@ -2,13 +2,27 @@
 // macOS: Keychain (primary) → ~/.claude/.credentials.json (fallback)
 // Linux/Windows: ~/.claude/.credentials.json only
 
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
 function getConfigDir() {
   return (process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
+}
+
+// Private-Anthropic-endpoint support. Corp deploys can set ANTHROPIC_BASE_URL
+// to an internal gateway; we respect it for every API call in this module.
+function getAnthropicBaseUrl() {
+  return (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
+}
+
+// Scrub anything token-shaped from free-form error strings before logging.
+function scrub(msg) {
+  if (!msg) return msg;
+  return String(msg).replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    .replace(/sk-[A-Za-z0-9._-]{8,}/g, 'sk-[redacted]')
+    .replace(/eyJ[A-Za-z0-9._-]{10,}/g, 'eyJ[redacted]');
 }
 
 function getKeychainServiceName() {
@@ -26,13 +40,17 @@ function readFromKeychain() {
   try {
     const service = getKeychainServiceName();
     const user = process.env.USER || os.userInfo().username;
-    const json = execSync(
-      `security find-generic-password -a "${user}" -w -s "${service}"`,
+    // execFileSync — no shell, so user/service can't be escaped out of.
+    const json = execFileSync(
+      'security',
+      ['find-generic-password', '-a', user, '-w', '-s', service],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
     ).trim();
     return JSON.parse(json);
   } catch (err) {
-    console.error('[claude-auth] Keychain read error:', err.message);
+    // Don't log err.message directly — macOS security(1) can echo the
+    // service name, which may itself embed sensitive data.
+    console.error('[claude-auth] Keychain read failed');
     return null;
   }
 }
@@ -40,9 +58,18 @@ function readFromKeychain() {
 function readFromFile() {
   try {
     const credPath = path.join(getConfigDir(), '.credentials.json');
+    // Warn once if the credentials file is readable by group/other.
+    try {
+      const st = fs.statSync(credPath);
+      const loose = (st.mode & 0o077) !== 0;
+      if (loose && process.platform !== 'win32') {
+        console.warn(`[claude-auth] ${credPath} has loose permissions (mode=${(st.mode & 0o777).toString(8)}); expected 600`);
+      }
+    } catch {}
     return JSON.parse(fs.readFileSync(credPath, 'utf8'));
   } catch (err) {
-    console.error('[claude-auth] Credentials file read error:', err.message);
+    // Keep this generic — the path and error may contain identifying info.
+    console.error('[claude-auth] Credentials file read failed');
     return null;
   }
 }
@@ -108,7 +135,7 @@ async function fetchUsage() {
   const oauth = getOAuthToken();
   if (!oauth?.accessToken) return null;
 
-  const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+  const res = await fetch(`${getAnthropicBaseUrl()}/api/oauth/usage`, {
     headers: {
       'Authorization': `Bearer ${oauth.accessToken}`,
       'Content-Type': 'application/json',
@@ -141,8 +168,8 @@ async function fetchAndTransformUsage() {
     }
     return transformUsageResponse(raw);
   } catch (err) {
-    return { _error: true, message: err.message };
+    return { _error: true, message: scrub(err.message) };
   }
 }
 
-module.exports = { getOAuthToken, fetchUsage, fetchAndTransformUsage, getConfigDir };
+module.exports = { getOAuthToken, fetchUsage, fetchAndTransformUsage, getConfigDir, getAnthropicBaseUrl, scrub };
