@@ -5,6 +5,11 @@ dist/
 *.db-shm
 public/codemirror-bundle.js
 electron-builder-config.json
+
+# Skins: keep the default, ignore any private/branded skins dropped in here.
+skins/*
+!skins/switchboard/
+!skins/README.md
 .DS_Store
 *.pem
 .env

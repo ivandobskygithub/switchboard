@@ -47,14 +47,16 @@ Output in `dist/`.
 
 ## Reskin / rebrand
 
-1. Copy `branding.json` to an out-of-tree path (e.g. `~/my-brand.json`).
-2. Edit `productName`, `appId`, `windowTitle`, `mcpIdeName`, `tmpFilePrefix`, optional `publish`.
-3. Build:
-   ```bash
-   SWITCHBOARD_BRANDING=/abs/path/my-brand.json npm run build:mac
-   ```
+Skins live under `skins/<name>/` — see [`skins/README.md`](skins/README.md) for the full workflow. Quick version:
 
-`apply-branding.js` merges your JSON into a temp `electron-builder-config.json`. Code-level strings (window title, MCP IDE name, temp-file prefix) come from `branding.js` at runtime.
+```bash
+cp -r skins/switchboard skins/<name>
+$EDITOR skins/<name>/branding.json        # edit productName, appId, …
+# drop in icon.png / icon.icns / icon.ico / dmg-background.png
+SWITCHBOARD_SKIN=<name> npm run build:mac
+```
+
+`skins/*` other than `skins/switchboard/` is git-ignored, so private skins stay local.
 
 ## Env vars
 
@@ -63,7 +65,8 @@ Output in `dist/`.
 | `ANTHROPIC_BASE_URL` | Private Anthropic gateway for the child `claude` process |
 | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Token for the child `claude` process |
 | `CLAUDE_CONFIG_DIR` | Override `~/.claude` |
-| `SWITCHBOARD_BRANDING` | Absolute path to a branding override JSON at build time |
+| `SWITCHBOARD_SKIN` | Skin name under `skins/<name>/` (default `switchboard`) |
+| `SWITCHBOARD_BRANDING` | Absolute path to a skin directory or `branding.json` (overrides `SWITCHBOARD_SKIN`) |
 | `SWITCHBOARD_ALLOW_NPM_INSTALL=1` | Bypass the preinstall guard to add a new dep |
 
 ## Prereqs
@@ -80,7 +83,8 @@ db.js              SQLite cache + settings
 path-guard.js      IPC file path whitelist
 claude-cmd.js      Shell-escaped claude CLI command builder
 mcp-bridge.js      Per-session localhost MCP WebSocket server
-branding.js/.json  Brand strings, overridable at build time
+branding.js        Runtime branding loader
+skins/<name>/      Branding assets (default: skins/switchboard/)
 public/            Renderer (HTML/CSS/JS)
 scripts/           Build helpers (preinstall guard, codesign, branding)
 test/              node:test suites
