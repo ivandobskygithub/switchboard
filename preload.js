@@ -7,7 +7,6 @@ contextBridge.exposeInMainWorld('api', {
   savePlan: (filePath, content) => ipcRenderer.invoke('save-plan', filePath, content),
   getStats: () => ipcRenderer.invoke('get-stats'),
   refreshStats: () => ipcRenderer.invoke('refresh-stats'),
-  getUsage: () => ipcRenderer.invoke('get-usage'),
   getMemories: () => ipcRenderer.invoke('get-memories'),
   readMemory: (filePath) => ipcRenderer.invoke('read-memory', filePath),
   saveMemory: (filePath, content) => ipcRenderer.invoke('save-memory', filePath, content),
@@ -77,14 +76,6 @@ contextBridge.exposeInMainWorld('api', {
 
   // App version
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
-
-  // Auto-updater
-  updaterCheck: () => ipcRenderer.invoke('updater-check'),
-  updaterDownload: () => ipcRenderer.invoke('updater-download'),
-  updaterInstall: () => ipcRenderer.invoke('updater-install'),
-  onUpdaterEvent: (callback) => {
-    ipcRenderer.on('updater-event', (_event, type, data) => callback(type, data));
-  },
 
   // MCP bridge (main → renderer)
   onMcpOpenDiff: (callback) => {

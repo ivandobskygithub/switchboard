@@ -7,7 +7,6 @@ const pty = require('node-pty');
 const log = require('electron-log');
 // getFolderIndexMtimeMs moved to session-cache.js
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
-const { fetchAndTransformUsage } = require('./claude-auth');
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
 const { buildClaudeCmd } = require('./claude-cmd');
 const branding = require('./branding');
@@ -33,7 +32,7 @@ const cleanPtyEnv = Object.fromEntries(
 
 // IPC: re-read a whitelist of env vars from the user's login shell rc file.
 // Used when the user rotates their Anthropic token in ~/.zshrc and wants
-// newly-spawned sessions (and the updater) to pick it up without restarting.
+// newly-spawned sessions to pick it up without restarting.
 const ENV_RELOAD_WHITELIST = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'];
 ipcMain.handle('reload-shell-env', async () => {
   if (process.platform === 'win32') {
@@ -77,44 +76,7 @@ const { startScheduler } = require('./schedule-runner');
 
 
 
-// --- Auto-updater (only in packaged builds, opt-in) ---
-// Disabled by default so corp/offline installs never reach out to GitHub.
-// Set SWITCHBOARD_ENABLE_UPDATES=1 (and have a configured feed URL) to re-enable.
-let autoUpdater = null;
-const UPDATES_ENABLED = process.env.SWITCHBOARD_ENABLE_UPDATES === '1';
-if (UPDATES_ENABLED && (app.isPackaged || process.env.FORCE_UPDATER)) {
-  autoUpdater = require('electron-updater').autoUpdater;
-  autoUpdater.logger = log;
-  // Never auto-download or auto-install without explicit user action.
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
-  if (!app.isPackaged) autoUpdater.forceDevUpdateConfig = true;
-  if (process.env.SWITCHBOARD_UPDATE_FEED_URL) {
-    try {
-      autoUpdater.setFeedURL({ provider: 'generic', url: process.env.SWITCHBOARD_UPDATE_FEED_URL });
-    } catch (e) {
-      log.error('[updater] setFeedURL failed:', e?.message || String(e));
-    }
-  }
-
-  function sendUpdaterEvent(type, data) {
-    log.info(`[updater] ${type}`, data || '');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', type, data);
-    }
-  }
-  autoUpdater.on('checking-for-update', () => sendUpdaterEvent('checking'));
-  autoUpdater.on('update-available', (info) => sendUpdaterEvent('update-available', info));
-  autoUpdater.on('update-not-available', (info) => sendUpdaterEvent('update-not-available', info));
-  autoUpdater.on('download-progress', (progress) => sendUpdaterEvent('download-progress', progress));
-  autoUpdater.on('update-downloaded', (info) => sendUpdaterEvent('update-downloaded', info));
-  autoUpdater.on('error', (err) => {
-    log.error('[updater] Error:', err?.message || String(err));
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', 'error', { message: err?.message || String(err) });
-    }
-  });
-}
+// Auto-updater removed: this build never contacts any update server.
 const {
   getMeta, getAllMeta, toggleStar, setName, setArchived,
   isCachePopulated, getAllCached, getCachedByFolder, getCachedFolder, getCachedSession, upsertCachedSessions,
@@ -659,13 +621,9 @@ ipcMain.handle('refresh-stats', async () => {
   }
 
   try {
-    // Run /stats via PTY (for heatmap/chart data) and fetch usage via API in parallel
-    const [, usage] = await Promise.all([
-      runClaude('"/stats"', { waitFor: /streak/i, timeoutMs: 10000 }),
-      fetchAndTransformUsage().catch(() => ({})),
-    ]);
+    // Run /stats via PTY only — usage API removed.
+    await runClaude('"/stats"', { waitFor: /streak/i, timeoutMs: 10000 });
 
-    // Read refreshed stats cache
     let stats = null;
     try {
       if (fs.existsSync(STATS_CACHE_PATH)) {
@@ -673,22 +631,15 @@ ipcMain.handle('refresh-stats', async () => {
       }
     } catch {}
 
-    return { stats, usage: usage || {} };
+    return { stats, usage: {} };
   } catch (err) {
     log.error('Error refreshing stats:', err);
     return { stats: null, usage: {} };
   }
 });
 
-// --- IPC: get-usage (lightweight, API-only, no PTY) ---
-ipcMain.handle('get-usage', async () => {
-  try {
-    return await fetchAndTransformUsage() || {};
-  } catch (err) {
-    log.error('Error fetching usage:', err);
-    return {};
-  }
-});
+// get-usage handler removed: usage API calls have been disabled.
+ipcMain.handle('get-usage', () => ({}));
 
 // --- IPC: get-memories ---
 function folderToShortPath(folder) {
@@ -1426,19 +1377,12 @@ function startProjectsWatcher() {
 // --- IPC: app version ---
 ipcMain.handle('get-app-version', () => app.getVersion());
 
-// --- IPC: auto-updater ---
-ipcMain.handle('updater-check', () => {
-  if (!autoUpdater) return { available: false, dev: true };
-  return autoUpdater.checkForUpdates();
-});
-ipcMain.handle('updater-download', () => {
-  if (!autoUpdater) return;
-  return autoUpdater.downloadUpdate();
-});
-ipcMain.handle('updater-install', () => {
-  if (!autoUpdater) return;
-  autoUpdater.quitAndInstall();
-});
+// Auto-updater IPC removed — handlers below return inert results so any
+// stray renderer callers don't throw. The renderer itself no longer wires
+// these up.
+ipcMain.handle('updater-check', () => ({ available: false, disabled: true }));
+ipcMain.handle('updater-download', () => {});
+ipcMain.handle('updater-install', () => {});
 
 // --- App lifecycle ---
 app.whenReady().then(() => {
@@ -1496,13 +1440,6 @@ app.whenReady().then(() => {
 
   // Re-index search if FTS table was recreated (e.g. tokenizer config change)
   if (searchFtsRecreated) populateCacheViaWorker();
-
-  // Check for updates after launch (only when explicitly enabled)
-  if (autoUpdater) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 5000);
-    // Re-check every 4 hours for long-running sessions
-    setInterval(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 4 * 60 * 60 * 1000);
-  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

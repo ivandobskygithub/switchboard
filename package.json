@@ -30,7 +30,6 @@
     "better-sqlite3": "12.8.0",
     "dompurify": "3.4.1",
     "electron-log": "5.4.3",
-    "electron-updater": "6.8.3",
     "marked": "17.0.4",
     "morphdom": "2.7.8",
     "node-pty": "1.1.0",
@@ -66,11 +65,6 @@
       "node_modules/better-sqlite3/**",
       "node_modules/node-pty/**"
     ],
-    "publish": {
-      "provider": "github",
-      "owner": "doctly",
-      "repo": "switchboard"
-    },
     "mac": {
       "target": [
         {

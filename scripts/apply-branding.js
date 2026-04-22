@@ -24,6 +24,8 @@ if (branding.publish) {
   // Replace wholesale so switching providers (github → generic) doesn't
   // leave stale owner/repo fields that confuse electron-builder.
   build.publish = { ...branding.publish };
+} else {
+  delete build.publish;
 }
 
 const outPath = path.join(root, 'electron-builder-config.json');

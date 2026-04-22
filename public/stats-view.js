@@ -1,8 +1,6 @@
 // --- Stats view ---
 // Depends on globals: escapeHtml (utils.js), statsViewerBody (app.js)
 
-let cachedUsage = null;
-
 async function loadStats() {
   statsViewerBody.innerHTML = '';
 
@@ -12,27 +10,23 @@ async function loadStats() {
   spinner.innerHTML = `<div class="stats-spinner-icon"></div><span>Updating stats\u2026</span>`;
   statsViewerBody.appendChild(spinner);
 
-  // Refresh stats cache via PTY (/stats + /usage)
-  let stats, usage;
+  // Refresh stats cache via PTY (/stats). Usage API fetch has been removed.
+  let stats;
   try {
     const result = await window.api.refreshStats();
     stats = result?.stats;
-    usage = result?.usage || {};
-    cachedUsage = usage;
   } catch {
-    // Fallback to cached stats
     stats = await window.api.getStats();
-    usage = cachedUsage || {};
   }
 
   statsViewerBody.innerHTML = '';
 
-  if (!stats && !Object.keys(usage).length) {
+  if (!stats) {
     statsViewerBody.innerHTML = '<div class="plans-empty">No stats data found. Run some Claude sessions first.</div>';
     return;
   }
 
-  if (stats) {
+  {
     // dailyActivity may be an array of {date, messageCount, ...} or an object
     const rawDaily = stats.dailyActivity || {};
     let dailyMap = {};
@@ -50,11 +44,6 @@ async function loadStats() {
     buildStatsSummary(stats, dailyMap);
   }
 
-  // Build usage section below charts (from /usage output)
-  if (Object.keys(usage).length) {
-    buildUsageSection(usage);
-  }
-
   if (stats) {
     const notice = document.createElement('div');
     notice.className = 'stats-notice';
@@ -62,114 +51,6 @@ async function loadStats() {
     notice.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="vertical-align:-2px;margin-right:6px;flex-shrink:0"><circle cx="8" cy="8" r="7"/><line x1="8" y1="5" x2="8" y2="9"/><circle cx="8" cy="11.5" r="0.5" fill="currentColor" stroke="none"/></svg>Data sourced from Claude\u2019s stats cache (last updated ${escapeHtml(lastDate)}).`;
     statsViewerBody.appendChild(notice);
   }
-}
-
-function buildUsageSection(usage) {
-  // Remove existing usage container if present (for refresh)
-  const existing = statsViewerBody.querySelector('.usage-container');
-  if (existing) existing.remove();
-
-  const container = document.createElement('div');
-  container.className = 'usage-container';
-
-  const titleRow = document.createElement('div');
-  titleRow.className = 'usage-title-row';
-  const title = document.createElement('div');
-  title.className = 'daily-chart-title';
-  title.textContent = 'Rate Limits';
-  titleRow.appendChild(title);
-
-  const refreshBtn = document.createElement('button');
-  refreshBtn.className = 'usage-refresh-btn';
-  refreshBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>';
-  refreshBtn.title = 'Refresh usage';
-  refreshBtn.onclick = async () => {
-    refreshBtn.classList.add('usage-refresh-spinning');
-    refreshBtn.disabled = true;
-    try {
-      const freshUsage = await window.api.getUsage();
-      if (freshUsage && Object.keys(freshUsage).length) {
-        cachedUsage = freshUsage;
-        buildUsageSection(freshUsage);
-      }
-    } catch {}
-    refreshBtn.classList.remove('usage-refresh-spinning');
-    refreshBtn.disabled = false;
-  };
-  titleRow.appendChild(refreshBtn);
-  container.appendChild(titleRow);
-
-  // Show rate limit or error notice
-  if (usage._rateLimited || usage._error) {
-    const notice = document.createElement('div');
-    notice.className = 'usage-rate-limited';
-    if (usage._rateLimited) {
-      const secs = usage.retryAfterSeconds || 0;
-      const mins = Math.ceil(secs / 60);
-      notice.textContent = secs > 0
-        ? `Usage API rate limited. Try again in ~${mins} min${mins !== 1 ? 's' : ''}.`
-        : 'Usage API rate limited. Try again later.';
-    } else {
-      notice.textContent = usage.message || 'Could not fetch usage data.';
-    }
-    container.appendChild(notice);
-    const statsNotice = statsViewerBody.querySelector('.stats-notice');
-    if (statsNotice) statsViewerBody.insertBefore(container, statsNotice);
-    else statsViewerBody.appendChild(container);
-    return;
-  }
-
-  const grid = document.createElement('div');
-  grid.className = 'usage-grid';
-
-  const items = [
-    { key: 'session', label: 'Current session', resetKey: 'sessionReset' },
-    { key: 'weekAll', label: 'Week (all models)', resetKey: 'weekAllReset' },
-    { key: 'weekSonnet', label: 'Week (Sonnet)', resetKey: 'weekSonnetReset' },
-    { key: 'weekOpus', label: 'Week (Opus)', resetKey: 'weekOpusReset' },
-  ];
-
-  for (const item of items) {
-    if (usage[item.key] === undefined) continue;
-    const pct = usage[item.key];
-    const card = document.createElement('div');
-    card.className = 'usage-card';
-
-    const header = document.createElement('div');
-    header.className = 'usage-card-header';
-    const label = document.createElement('span');
-    label.className = 'usage-card-label';
-    label.textContent = item.label;
-    header.appendChild(label);
-    const pctEl = document.createElement('span');
-    pctEl.className = 'usage-card-pct';
-    pctEl.textContent = pct + '%';
-    header.appendChild(pctEl);
-    card.appendChild(header);
-
-    const track = document.createElement('div');
-    track.className = 'usage-track';
-    const fill = document.createElement('div');
-    fill.className = 'usage-fill' + (pct >= 80 ? ' usage-fill-high' : '');
-    fill.style.width = Math.max(pct, 1) + '%';
-    track.appendChild(fill);
-    card.appendChild(track);
-
-    if (usage[item.resetKey]) {
-      const reset = document.createElement('div');
-      reset.className = 'usage-card-reset';
-      reset.textContent = 'Resets ' + usage[item.resetKey];
-      card.appendChild(reset);
-    }
-
-    grid.appendChild(card);
-  }
-
-  container.appendChild(grid);
-  // Insert before the stats notice footer if it exists, otherwise append
-  const statsNotice = statsViewerBody.querySelector('.stats-notice');
-  if (statsNotice) statsViewerBody.insertBefore(container, statsNotice);
-  else statsViewerBody.appendChild(container);
 }
 
 function buildDailyBarChart(stats) {
