@@ -11,7 +11,9 @@ const { fetchAndTransformUsage } = require('./claude-auth');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
-try { require('electron-reloader')(module, { watchRenderer: true }); } catch {};
+if (!app.isPackaged) {
+  try { require('electron-reloader')(module, { watchRenderer: true }); } catch {}
+}
 
 // Clean env for child processes — strip Electron internals that cause nested
 // Electron apps (or node-pty inside them) to malfunction.
