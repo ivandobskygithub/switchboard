@@ -14,6 +14,7 @@ import { json } from '@codemirror/lang-json';
 import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { rust } from '@codemirror/lang-rust';
 import { go } from '@codemirror/lang-go';
 import { java } from '@codemirror/lang-java';
@@ -542,3 +543,11 @@ window.cmOpenGotoLine = openGotoLine;
 
 marked.setOptions({ breaks: true, gfm: true });
 window.marked = marked;
+window.DOMPurify = DOMPurify;
+// Any caller that renders markdown MUST go through safeMarkdown — wrap once
+// so jsonl-viewer et al can stay simple. Blocks <script>, event handlers,
+// javascript: URLs, SVG script, etc.
+window.safeMarkdown = (src) => {
+  const html = marked.parse(String(src ?? ''));
+  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+};

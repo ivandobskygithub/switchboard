@@ -3,14 +3,16 @@
 // terminalArea, jsonlViewer, jsonlViewerTitle, jsonlViewerSessionId, jsonlViewerBody (app.js)
 
 function renderJsonlText(text) {
-  if (window.marked) {
-    // Escape XML/HTML-like tags so they render as visible text,
-    // but preserve markdown code blocks (which may contain HTML examples).
-    const escaped = text.replace(/<(\/?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?\/?)\>/g, '&lt;$1&gt;');
-    let html = window.marked.parse(escaped);
-    return html;
+  // Escape XML/HTML-like tags so they render as visible text,
+  // but preserve markdown code blocks (which may contain HTML examples).
+  const escaped = String(text ?? '').replace(/<(\/?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?\/?)\>/g, '&lt;$1&gt;');
+  if (window.safeMarkdown) {
+    return window.safeMarkdown(escaped);
   }
-  // Fallback if marked isn't loaded
+  if (window.marked && window.DOMPurify) {
+    return window.DOMPurify.sanitize(window.marked.parse(escaped));
+  }
+  // Last-resort fallback: plain-text escape plus a few minimal conversions.
   let html = escapeHtml(text);
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="jsonl-code-block"><code>$2</code></pre>');
   html = html.replace(/`([^`]+)`/g, '<code class="jsonl-inline-code">$1</code>');
