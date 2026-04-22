@@ -170,8 +170,18 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      experimentalFeatures: false,
     },
   });
+
+  // Keep the window title under branding control — otherwise <title> in
+  // index.html would stomp on BrowserWindow's `title` as soon as the page
+  // loads. preventDefault on page-title-updated holds the current title.
+  mainWindow.on('page-title-updated', (e) => e.preventDefault());
+  mainWindow.setTitle(branding.windowTitle);
 
   // Set position after creation to prevent macOS from clamping size
   if (restorePosition) {

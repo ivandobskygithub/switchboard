@@ -4,6 +4,7 @@ dist/
 *.db-wal
 *.db-shm
 public/codemirror-bundle.js
+electron-builder-config.json
 .DS_Store
 *.pem
 .env
