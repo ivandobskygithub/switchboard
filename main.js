@@ -812,16 +812,27 @@ ipcMain.handle('search', (_event, type, query, titleOnly) => {
 });
 
 // --- IPC: settings ---
+// Renderer can only read/write settings whose keys match this allowlist.
+// Prevents the renderer from stomping on schedule-runner / cron / other
+// internal keys if they are added later.
+const SETTING_KEY_RE = /^(global|searchTitlesOnly|project:.+)$/;
+function isAllowedSettingKey(key) {
+  return typeof key === 'string' && key.length <= 4096 && SETTING_KEY_RE.test(key);
+}
+
 ipcMain.handle('get-setting', (_event, key) => {
+  if (!isAllowedSettingKey(key)) return null;
   return getSetting(key);
 });
 
 ipcMain.handle('set-setting', (_event, key, value) => {
+  if (!isAllowedSettingKey(key)) return { ok: false, error: 'setting key not allowed' };
   setSetting(key, value);
   return { ok: true };
 });
 
 ipcMain.handle('delete-setting', (_event, key) => {
+  if (!isAllowedSettingKey(key)) return { ok: false, error: 'setting key not allowed' };
   deleteSetting(key);
   return { ok: true };
 });
