@@ -16,6 +16,7 @@
     "build:mac": "npm run bundle:codemirror && npm run apply-branding && electron-builder --mac --config electron-builder-config.json && node scripts/postinstall.js && node scripts/codesign-app.js 2>/dev/null; true",
     "build:mac:arm64": "npm run apply-branding && electron-builder --mac --arm64 --config electron-builder-config.json 2>/dev/null; true",
     "build:win": "npm run bundle:codemirror && npm run apply-branding && electron-builder --win --config electron-builder-config.json",
+    "build:win:portable": "npm run bundle:codemirror && npm run apply-branding && electron-builder --win --dir --config electron-builder-config.json",
     "build:linux": "npm run bundle:codemirror && npm run apply-branding && electron-builder --linux --config electron-builder-config.json",
     "release": "npm run bundle:codemirror && npm run apply-branding && electron-builder --publish always --config electron-builder-config.json",
     "preinstall": "node scripts/preinstall-guard.js",
@@ -65,6 +66,9 @@
       "node_modules/better-sqlite3/**",
       "node_modules/node-pty/**"
     ],
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "buildDependenciesFromSource": false,
     "mac": {
       "target": [
         {
