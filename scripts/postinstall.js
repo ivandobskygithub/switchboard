@@ -1,17 +1,18 @@
 #!/usr/bin/env node
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
+const EXEC_TIMEOUT = 10 * 60 * 1000; // 10 min — native builds can be slow but not infinite
 const path = require('path');
 const fs = require('fs');
 
 // Install native dependencies for Electron
 try {
-  execSync('npx electron-builder install-app-deps', { stdio: 'inherit' });
+  execSync('npx electron-builder install-app-deps', { stdio: 'inherit', timeout: EXEC_TIMEOUT });
 } catch (err) {
   console.error('electron-builder install-app-deps failed:', err.message);
   // Fallback: rebuild only better-sqlite3 for Electron (node-pty uses prebuilds)
   console.log('Attempting fallback: rebuilding better-sqlite3 for Electron...');
   try {
-    execSync('npx @electron/rebuild -f -m . -o better-sqlite3', { stdio: 'inherit' });
+    execSync('npx @electron/rebuild -f -m . -o better-sqlite3', { stdio: 'inherit', timeout: EXEC_TIMEOUT });
     console.log('Fallback rebuild succeeded.');
   } catch (err2) {
     console.error('Fallback rebuild also failed:', err2.message);
@@ -25,7 +26,8 @@ if (process.platform !== 'win32') {
     const nodeModules = path.join(__dirname, '..', 'node_modules');
     findFiles(nodeModules, '.node').forEach(file => {
       try {
-        execSync(`codesign --sign - --force "${file}"`, { stdio: 'ignore' });
+        // execFileSync: no shell, so filenames with spaces/quotes are safe.
+        execFileSync('codesign', ['--sign', '-', '--force', file], { stdio: 'ignore', timeout: 30000 });
       } catch {}
     });
   } catch {}

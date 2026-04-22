@@ -1143,6 +1143,15 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         ptyEnv.CLAUDE_CODE_SSE_PORT = String(mcpServer.port);
       }
 
+      // Schedule cleanup of the system-prompt temp file once the shell has
+      // had time to $(cat ...) it into the command line. Also unlink on
+      // session exit and app quit as belt-and-braces.
+      if (tmpPrompt) {
+        const doUnlink = () => { try { fs.unlinkSync(tmpPrompt); } catch {} };
+        setTimeout(doUnlink, 30_000).unref?.();
+        app.once('before-quit', doUnlink);
+      }
+
       ptyProcess = pty.spawn(shell, shellArgs(shell, claudeCmd, shellExtraArgs), {
         name: 'xterm-256color',
         cols: 120,
