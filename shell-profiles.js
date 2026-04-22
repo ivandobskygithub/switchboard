@@ -10,7 +10,7 @@ function discoverShellProfiles() {
   const profiles = [];
 
   if (isWindows) {
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
 
     // CMD
     const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
@@ -54,10 +54,12 @@ function discoverShellProfiles() {
       profiles.push({ id: 'msys2', name: 'MSYS2', path: 'C:\\msys64\\usr\\bin\\bash.exe' });
     }
 
-    // WSL distributions
+    // WSL distributions. execFileSync (not execSync) so no shell interpolation.
     try {
-      const raw = execSync('wsl.exe --list --quiet', { timeout: 5000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-      const distros = raw.replace(/\0/g, '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const raw = execFileSync('wsl.exe', ['--list', '--quiet'], { timeout: 5000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      // Only accept sane distro names — guards the UI list and the later spawn args.
+      const distroRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+      const distros = raw.replace(/\0/g, '').split(/\r?\n/).map(s => s.trim()).filter(s => s && distroRe.test(s));
       for (const distro of distros) {
         profiles.push({ id: 'wsl:' + distro, name: 'WSL — ' + distro, path: 'wsl.exe', args: ['-d', distro] });
       }
