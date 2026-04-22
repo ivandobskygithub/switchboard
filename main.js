@@ -31,14 +31,25 @@ const { startScheduler } = require('./schedule-runner');
 
 
 
-// --- Auto-updater (only in packaged builds) ---
+// --- Auto-updater (only in packaged builds, opt-in) ---
+// Disabled by default so corp/offline installs never reach out to GitHub.
+// Set SWITCHBOARD_ENABLE_UPDATES=1 (and have a configured feed URL) to re-enable.
 let autoUpdater = null;
-if (app.isPackaged || process.env.FORCE_UPDATER) {
+const UPDATES_ENABLED = process.env.SWITCHBOARD_ENABLE_UPDATES === '1';
+if (UPDATES_ENABLED && (app.isPackaged || process.env.FORCE_UPDATER)) {
   autoUpdater = require('electron-updater').autoUpdater;
   autoUpdater.logger = log;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Never auto-download or auto-install without explicit user action.
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
   if (!app.isPackaged) autoUpdater.forceDevUpdateConfig = true;
+  if (process.env.SWITCHBOARD_UPDATE_FEED_URL) {
+    try {
+      autoUpdater.setFeedURL({ provider: 'generic', url: process.env.SWITCHBOARD_UPDATE_FEED_URL });
+    } catch (e) {
+      log.error('[updater] setFeedURL failed:', e?.message || String(e));
+    }
+  }
 
   function sendUpdaterEvent(type, data) {
     log.info(`[updater] ${type}`, data || '');
@@ -1420,7 +1431,7 @@ app.whenReady().then(() => {
   // Re-index search if FTS table was recreated (e.g. tokenizer config change)
   if (searchFtsRecreated) populateCacheViaWorker();
 
-  // Check for updates after launch
+  // Check for updates after launch (only when explicitly enabled)
   if (autoUpdater) {
     setTimeout(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 5000);
     // Re-check every 4 hours for long-running sessions
