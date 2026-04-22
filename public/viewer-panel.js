@@ -286,7 +286,13 @@ class ViewerPanel {
     }
 
     if (this.previewMode) {
-      this.previewEl.innerHTML = window.marked.parse(newContent);
+      // File contents come from disk (any project file) — sanitise the
+      // rendered HTML so a `<script>` in a markdown file can't execute.
+      if (window.safeMarkdown) {
+        this.previewEl.innerHTML = window.safeMarkdown(newContent);
+      } else {
+        safeSetHtml(this.previewEl, window.marked.parse(newContent));
+      }
     }
   }
 

@@ -285,7 +285,7 @@ function renderProjects(projects, resort) {
     header.className = 'project-header';
     header.id = 'ph-' + fId;
     const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
+    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${escapeHtml(shortName)}</span>`;
 
     const scheduleBtn = document.createElement('button');
     scheduleBtn.className = 'project-schedule-btn';

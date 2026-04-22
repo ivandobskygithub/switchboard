@@ -73,15 +73,21 @@ function toolBlock(color, label, summary, content) {
   el.className = 'jsonl-tool-block';
   const header = document.createElement('div');
   header.className = 'jsonl-tool-header';
-  header.innerHTML = '<span class="jsonl-tool-bullet" style="color:' + color + '">●</span>'
+  // color is from a small set of literal hex strings authored in this file.
+  // label is escaped above. summary and (string) content are constructed by
+  // tool renderers that already escapeHtml their dynamic data, but we route
+  // them through DOMPurify as defence-in-depth so a future renderer that
+  // forgets to escape can't introduce XSS.
+  safeSetHtml(header,
+    '<span class="jsonl-tool-bullet" style="color:' + color + '">●</span>'
     + '<span class="jsonl-tool-name">' + escapeHtml(label) + '</span>'
-    + (summary ? '<span class="jsonl-tool-summary">' + summary + '</span>' : '');
+    + (summary ? '<span class="jsonl-tool-summary">' + summary + '</span>' : ''));
   el.appendChild(header);
   if (content) {
     const body = document.createElement('div');
     body.className = 'jsonl-tool-content';
     if (typeof content === 'string') {
-      body.innerHTML = content;
+      safeSetHtml(body, content);
     } else {
       body.appendChild(content);
     }
@@ -175,7 +181,7 @@ const toolRenderers = {
       for (const line of input.new_string.split('\n')) {
         html += '<span class="jsonl-diff-add">+ ' + escapeHtml(line) + '</span>\n';
       }
-      diff.innerHTML = html;
+      safeSetHtml(diff, html);
       content = diff;
     }
     return toolBlock('#e0a040', 'Edit', '<code>' + escapeHtml(shortPath(path)) + '</code>', content);
@@ -435,13 +441,17 @@ function renderJsonlEntry(entry, toolResultMap) {
     const div = document.createElement('div');
     div.className = 'jsonl-entry jsonl-meta-entry';
     if (entry.subtype === 'turn_duration') {
-      div.innerHTML = '<span class="jsonl-meta-icon">&#9201;</span> Turn duration: <strong>' + formatDuration(entry.durationMs) + '</strong>'
-        + (timeStr ? ' <span class="jsonl-ts">' + timeStr + '</span>' : '');
+      // formatDuration returns a numeric string ("5s"/"200ms") and timeStr
+      // is escapeHtml'd at construction; sanitised again as a guardrail.
+      safeSetHtml(div,
+        '<span class="jsonl-meta-icon">&#9201;</span> Turn duration: <strong>' + escapeHtml(formatDuration(entry.durationMs)) + '</strong>'
+        + (timeStr ? ' <span class="jsonl-ts">' + escapeHtml(timeStr) + '</span>' : ''));
     } else if (entry.subtype === 'local_command') {
       const cmdMatch = (entry.content || '').match(/<command-name>(.*?)<\/command-name>/);
       const cmd = cmdMatch ? cmdMatch[1] : entry.content || 'unknown';
-      div.innerHTML = '<span class="jsonl-meta-icon">$</span> Command: <code class="jsonl-inline-code">' + escapeHtml(cmd) + '</code>'
-        + (timeStr ? ' <span class="jsonl-ts">' + timeStr + '</span>' : '');
+      safeSetHtml(div,
+        '<span class="jsonl-meta-icon">$</span> Command: <code class="jsonl-inline-code">' + escapeHtml(cmd) + '</code>'
+        + (timeStr ? ' <span class="jsonl-ts">' + escapeHtml(timeStr) + '</span>' : ''));
     } else {
       return null;
     }
@@ -520,6 +530,8 @@ function renderJsonlEntry(entry, toolResultMap) {
       }
       const textEl = document.createElement('div');
       textEl.className = 'jsonl-text';
+      // renderJsonlText already runs through safeMarkdown (DOMPurify), so
+      // the result is sanitised. innerHTML is fine here.
       textEl.innerHTML = renderJsonlText(block.text.trim());
       div.appendChild(textEl);
     } else if (block.type === 'tool_use') {

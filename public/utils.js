@@ -34,3 +34,23 @@ function escapeHtml(str) {
 function shellEscape(path) {
   return "'" + path.replace(/'/g, "'\\''") + "'";
 }
+
+// Defence-in-depth: any innerHTML assignment whose source is session data
+// from disk (JSONL bodies, project paths, settings values, MCP tool params)
+// MUST go through this helper. It runs DOMPurify with the html profile,
+// stripping <script>, event handlers, javascript: URLs, SVG <script>, etc.
+//
+// Static strings authored in this codebase don't need it, but routing them
+// through is harmless. When in doubt, use this rather than raw innerHTML.
+function safeSetHtml(el, html) {
+  if (!el) return;
+  const src = String(html ?? '');
+  if (window.DOMPurify) {
+    el.innerHTML = window.DOMPurify.sanitize(src, { USE_PROFILES: { html: true } });
+  } else {
+    // DOMPurify is bundled with codemirror-bundle.js; if for some reason it
+    // hasn't loaded, fall back to a fully-escaped textContent so we never
+    // accidentally render unsanitized HTML.
+    el.textContent = src;
+  }
+}
