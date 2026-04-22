@@ -1,0 +1,3 @@
+{
+  "_comment": "Optional label overrides. Any key you set here wins over the hardcoded default in the UI. Unset keys fall through to the literal in public/*.js. Extend the set of overridable keys by wrapping hardcoded strings with `(window.api.strings && window.api.strings.KEY) || 'Default'`. A skin's strings.json replaces this file wholesale (no per-key merge across skins)."
+}

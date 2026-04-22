@@ -13,6 +13,7 @@ const path = require('path');
 const os = require('os');
 const net = require('net');
 const branding = require('./branding');
+const { validateHandshake } = require('./mcp-auth');
 
 const IDE_DIR = path.join(os.homedir(), '.claude', 'ide');
 const IDE_NAME = branding.mcpIdeName;
@@ -351,23 +352,10 @@ async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
   };
 
   wss.on('connection', (ws, req) => {
-    // Reject browser connections — MCP clients never send an Origin header.
-    if (req.headers.origin) {
-      log.warn(`[mcp] session=${sessionId} rejected connection: origin header present (${req.headers.origin})`);
-      ws.close(4003, 'Origin not allowed');
-      return;
-    }
-    // Validate auth in constant time.
-    const headerAuth = req.headers['x-claude-code-ide-authorization'] || '';
-    let ok = false;
-    try {
-      const a = Buffer.from(String(headerAuth));
-      const b = Buffer.from(authToken);
-      ok = a.length === b.length && crypto.timingSafeEqual(a, b);
-    } catch { ok = false; }
-    if (!ok) {
-      log.warn(`[mcp] session=${sessionId} rejected connection: bad auth`);
-      ws.close(4001, 'Unauthorized');
+    const check = validateHandshake(req, authToken);
+    if (!check.ok) {
+      log.warn(`[mcp] session=${sessionId} rejected connection: ${check.reason}`);
+      ws.close(check.code, check.reason);
       return;
     }
 

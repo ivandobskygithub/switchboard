@@ -93,6 +93,30 @@ SWITCHBOARD_SKIN=<name> npm start
 
 Window title, MCP IDE name, and tmp-file prefix will use the skin's values. Icon changes only take effect in a packaged build.
 
+## Label overrides (strings.json)
+
+Drop `skins/<name>/strings.json` alongside `branding.json` to override UI labels. The file is a flat `{ key: "Label" }` map. Unset keys fall through to the hardcoded default in the renderer.
+
+Example:
+
+```json
+{
+  "sidebar_sessions": "Conversations",
+  "sidebar_plans": "Briefs",
+  "add_project_btn_title": "Onboard a repo"
+}
+```
+
+In the renderer, any label you want to make overridable is wrapped:
+
+```js
+const label = (window.api.strings && window.api.strings.sidebar_sessions) || 'Sessions';
+```
+
+Most strings are still hardcoded — the scaffolding is in place but wrapping each one is opt-in. Grep the renderer for a string you want to swap, wrap it with the pattern above, then pick any key name and add it to your skin's `strings.json`.
+
+The snapshot is read once during preload via a sync IPC (`branding:getStrings`). Changing `strings.json` requires restarting the app.
+
 ## CSS / colour theming
 
 Brand colours, fonts, and CSS currently live in `public/style.css`. Skinning that layer is intentionally out of scope for `branding.json` — it's too invasive to diff-and-merge cleanly. Fork the CSS in your private skin layer and keep it alongside the skin dir, e.g. `skins/<name>/style.css`, then either:

@@ -1,6 +1,16 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Brand strings are resolved in the main process and fetched synchronously
+// at preload time (sandbox-compatible). Usage in the renderer:
+//   const label = (window.api.strings && window.api.strings.sidebar_sessions) || 'Sessions';
+let brandingStringsSnapshot = {};
+try {
+  const raw = ipcRenderer.sendSync('branding:getStrings');
+  if (raw && typeof raw === 'object') brandingStringsSnapshot = Object.freeze({ ...raw });
+} catch {}
+
 contextBridge.exposeInMainWorld('api', {
+  strings: brandingStringsSnapshot,
   // Invoke (request-response)
   getPlans: () => ipcRenderer.invoke('get-plans'),
   readPlan: (filename) => ipcRenderer.invoke('read-plan', filename),

@@ -10,6 +10,12 @@ const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolveP
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
 const { buildClaudeCmd } = require('./claude-cmd');
 const branding = require('./branding');
+
+// Sync IPC for the preload to fetch the brand-strings snapshot at load
+// time. ipcMain.on handles sendSync via event.returnValue.
+ipcMain.on('branding:getStrings', (event) => {
+  event.returnValue = branding.strings || {};
+});
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -816,13 +822,9 @@ ipcMain.handle('search', (_event, type, query, titleOnly) => {
 });
 
 // --- IPC: settings ---
-// Renderer can only read/write settings whose keys match this allowlist.
-// Prevents the renderer from stomping on schedule-runner / cron / other
-// internal keys if they are added later.
-const SETTING_KEY_RE = /^(global|searchTitlesOnly|project:.+)$/;
-function isAllowedSettingKey(key) {
-  return typeof key === 'string' && key.length <= 4096 && SETTING_KEY_RE.test(key);
-}
+// Renderer can only read/write keys that settings-guard accepts. Keeps
+// the renderer out of internal / future-reserved keys.
+const { isAllowedSettingKey } = require('./settings-guard');
 
 ipcMain.handle('get-setting', (_event, key) => {
   if (!isAllowedSettingKey(key)) return null;

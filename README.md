@@ -9,6 +9,16 @@ Desktop app for managing local Claude Code CLI sessions. Hardened fork for corp 
 - Plans, memory (`CLAUDE.md`), and activity heatmap in one place
 - Full-text search across session history
 
+## Status notifications
+
+Switchboard parses OSC escape sequences from each Claude CLI PTY and surfaces state without you needing to look at the terminal:
+
+- **Busy / idle** — spinner-style title updates flip `cli-busy-state` over IPC, which colours the sidebar indicator.
+- **Attention needed** — "Claude Code needs your attention", permission-approval prompts, and "wants to enter" dialogs are caught by a regex in `public/app.js` and badge the sidebar entry when that session isn't currently focused.
+- **Status bar** — free-form text messages from the main process (`status-update` IPC) appear in the status bar at the bottom of the window.
+
+Nothing in the hardening removed this — `terminal-notification`, `cli-busy-state`, and `status-update` IPC channels all remain.
+
 ## Offline / corp posture
 
 This build is intentionally locked down:
