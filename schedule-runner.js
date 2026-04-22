@@ -3,9 +3,24 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { shq } = require('./claude-cmd');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+
+// Whitelists for schedule frontmatter CLI values. Schedule files are
+// markdown in `<project>/.claude/commands/`; anything (including a compromised
+// session) with write access to the project can author one, so we validate
+// strictly rather than trusting the markdown.
+const PERMISSION_MODES = new Set(['plan', 'acceptEdits', 'default', 'bypassPermissions']);
+const ALLOWED_TOOL_NAMES = new Set([
+  'Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep',
+  'WebFetch', 'WebSearch', 'TodoWrite', 'Task', 'NotebookEdit',
+  'BashOutput', 'KillShell', 'SlashCommand',
+]);
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const UUID_RE = /^[0-9a-fA-F-]{8,64}$/;
+const BUDGET_RE = /^\d{1,6}(\.\d{1,4})?$/;
 
 /** Parse YAML-like frontmatter from a markdown file (simple key: value parser). */
 function parseFrontmatter(content) {
@@ -146,24 +161,61 @@ function createScheduleSession(schedule) {
   return { sessionId, jsonlPath };
 }
 
-/** Build a claude CLI command string for a scheduled task. */
+/**
+ * Build a claude CLI command string for a scheduled task.
+ * Every value from the schedule's frontmatter is validated or shell-quoted
+ * before hitting the command line. Returns { ok: false, error } if any field
+ * fails validation — the caller must not dispatch the run in that case.
+ */
 function buildScheduleCommand(sessionId, schedule) {
-  let cmd = `claude --resume "${sessionId}" -p "Run the scheduled task"`;
+  if (!UUID_RE.test(sessionId || '')) {
+    return { ok: false, error: 'invalid sessionId' };
+  }
+  const cli = schedule.cli || {};
 
-  const cli = schedule.cli;
-  cmd += ` --permission-mode "${cli['permission-mode'] || 'acceptEdits'}"`;
-  if (cli.model) cmd += ` --model "${cli.model}"`;
-  if (cli['max-budget-usd']) cmd += ` --max-budget-usd ${cli['max-budget-usd']}`;
-  const allowedTools = cli['allowed-tools'] || 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch';
-  cmd += ` --allowedTools "${allowedTools}"`;
-  if (cli['append-system-prompt']) cmd += ` --append-system-prompt "${cli['append-system-prompt'].replace(/"/g, '\\"')}"`;
+  let cmd = `claude --resume ${shq(sessionId)} -p ${shq('Run the scheduled task')}`;
+
+  const permissionMode = cli['permission-mode'] || 'acceptEdits';
+  if (!PERMISSION_MODES.has(permissionMode)) {
+    return { ok: false, error: `invalid permission-mode: ${permissionMode}` };
+  }
+  cmd += ` --permission-mode ${shq(permissionMode)}`;
+
+  if (cli.model) {
+    if (!MODEL_RE.test(cli.model)) return { ok: false, error: `invalid model: ${cli.model}` };
+    cmd += ` --model ${shq(cli.model)}`;
+  }
+
+  if (cli['max-budget-usd']) {
+    const b = String(cli['max-budget-usd']);
+    if (!BUDGET_RE.test(b)) return { ok: false, error: `invalid max-budget-usd: ${b}` };
+    cmd += ` --max-budget-usd ${b}`;
+  }
+
+  const rawTools = cli['allowed-tools'] || 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch';
+  const tools = String(rawTools).split(',').map(t => t.trim()).filter(Boolean);
+  for (const t of tools) {
+    if (!ALLOWED_TOOL_NAMES.has(t)) return { ok: false, error: `invalid tool: ${t}` };
+  }
+  cmd += ` --allowedTools ${shq(tools.join(','))}`;
+
+  if (cli['append-system-prompt']) {
+    // Full shell-escape of the whole value rather than a quote-only replace.
+    cmd += ` --append-system-prompt ${shq(cli['append-system-prompt'])}`;
+  }
+
   if (cli['add-dirs']) {
-    for (const dir of cli['add-dirs'].split(',').map(d => d.trim()).filter(Boolean)) {
-      cmd += ` --add-dir "${dir}"`;
+    for (const dir of String(cli['add-dirs']).split(',').map(d => d.trim()).filter(Boolean)) {
+      // Require absolute paths so a schedule can't reach outside its project
+      // via a relative traversal.
+      if (!path.isAbsolute(dir)) {
+        return { ok: false, error: `add-dir must be absolute: ${dir}` };
+      }
+      cmd += ` --add-dir ${shq(path.resolve(dir))}`;
     }
   }
 
-  return cmd;
+  return { ok: true, cmd };
 }
 
 /**
@@ -192,10 +244,14 @@ function startScheduler(log, runCommand) {
       log.info(`[schedule] Triggering: ${schedule.name} (${schedule.cron})`);
       try {
         const { sessionId } = createScheduleSession(schedule);
-        const cmd = buildScheduleCommand(sessionId, schedule);
+        const built = buildScheduleCommand(sessionId, schedule);
+        if (!built.ok) {
+          log.error(`[schedule] Refusing to run ${schedule.name}: ${built.error}`);
+          continue;
+        }
 
         runningTasks.add(taskKey);
-        runCommand(cmd, schedule.projectPath, schedule.name, () => {
+        runCommand(built.cmd, schedule.projectPath, schedule.name, () => {
           runningTasks.delete(taskKey);
         });
       } catch (err) {

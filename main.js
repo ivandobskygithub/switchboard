@@ -9,6 +9,7 @@ const log = require('electron-log');
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
 const { buildClaudeCmd } = require('./claude-cmd');
+const { isSafeExternalUrl } = require('./url-guard');
 const branding = require('./branding');
 
 // Sync IPC for the preload to fetch the brand-strings snapshot at load
@@ -160,13 +161,13 @@ function createWindow() {
 
   // Open external links in the system browser instead of a child BrowserWindow
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+    if (isSafeExternalUrl(url)) shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (url !== mainWindow.webContents.getURL()) {
       event.preventDefault();
-      if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+      if (isSafeExternalUrl(url)) shell.openExternal(url).catch(() => {});
     }
   });
   // Override window.open so xterm WebLinksAddon's default handler (which does
@@ -380,8 +381,12 @@ ipcMain.handle('remove-project', (_event, projectPath) => {
 
 // --- IPC: get-projects ---
 ipcMain.handle('open-external', (_event, url) => {
-  log.info('[open-external IPC]', url);
-  if (/^https?:\/\//i.test(url)) return shell.openExternal(url);
+  if (!isSafeExternalUrl(url)) {
+    log.warn('[open-external] rejected:', typeof url === 'string' ? url.slice(0, 200) : typeof url);
+    return false;
+  }
+  log.info('[open-external]', url);
+  return shell.openExternal(url);
 });
 
 // --- IPC: MCP bridge ---
@@ -413,11 +418,18 @@ ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
 });
 
 // ── File Watching (for viewer panels) ────────────────────────────────
+// Capped so a runaway / malicious renderer can't exhaust main-process fd's.
 const fileWatchers = new Map(); // filePath → FSWatcher
+const MAX_FILE_WATCHERS = 100;
 
 ipcMain.handle('watch-file', (_event, filePath) => {
-  const resolved = path.resolve(filePath);
+  const check = assertPathAllowed(filePath, 'read');
+  if (!check.ok) return { ok: false, error: check.error };
+  const resolved = check.resolved;
   if (fileWatchers.has(resolved)) return { ok: true };
+  if (fileWatchers.size >= MAX_FILE_WATCHERS) {
+    return { ok: false, error: 'watcher limit reached' };
+  }
   try {
     let debounce = null;
     const watcher = fs.watch(resolved, (eventType) => {

@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { assertPathAllowed } = require('./path-guard');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
@@ -137,6 +138,19 @@ function init(log, runCommand) {
 
   ipcMain.handle('create-schedule-session', (_event, projectPath) => {
     try {
+      // Reject paths the renderer has no business referencing. Projects the
+      // user has actually opened are seeded into path-guard at startup /
+      // add-project time.
+      const check = assertPathAllowed(projectPath, 'write');
+      if (!check.ok) {
+        log.warn(`[schedule] create-schedule-session rejected: ${check.error}`);
+        return null;
+      }
+      projectPath = check.resolved;
+      if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) {
+        return null;
+      }
+
       ensureScheduleCreatorCommand();
       const commandPath = path.join(SCHEDULE_COMMANDS_DIR, 'create-switchboard-schedule.md');
       const systemPrompt = fs.readFileSync(commandPath, 'utf8');
@@ -183,6 +197,17 @@ function init(log, runCommand) {
   });
   ipcMain.handle('run-schedule-now', (_event, filePath) => {
     try {
+      // Schedule files must live under an allowed project root and be .md.
+      const check = assertPathAllowed(filePath, 'read');
+      if (!check.ok) {
+        log.warn(`[schedule] run-schedule-now rejected: ${check.error}`);
+        return { ok: false, error: check.error };
+      }
+      if (!check.resolved.endsWith('.md')) {
+        return { ok: false, error: 'schedule file must be .md' };
+      }
+      filePath = check.resolved;
+
       const content = fs.readFileSync(filePath, 'utf8');
       const { meta, body } = parseFrontmatter(content);
       if (!body) return { ok: false, error: 'No prompt in schedule file' };
@@ -190,6 +215,11 @@ function init(log, runCommand) {
       const commandsDir = path.dirname(filePath);
       const dotClaudeDir = path.dirname(commandsDir);
       const projectPath = path.dirname(dotClaudeDir);
+      // Defence-in-depth: the derived project path must also be allowed.
+      const pCheck = assertPathAllowed(projectPath, 'write');
+      if (!pCheck.ok) {
+        return { ok: false, error: `derived project path not allowed: ${projectPath}` };
+      }
 
       const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
       const schedule = {
@@ -203,9 +233,13 @@ function init(log, runCommand) {
       };
 
       const { sessionId } = createScheduleSession(schedule);
-      const cmd = buildScheduleCommand(sessionId, schedule);
+      const built = buildScheduleCommand(sessionId, schedule);
+      if (!built.ok) {
+        log.error(`[schedule] Refusing to run ${schedule.name}: ${built.error}`);
+        return { ok: false, error: built.error };
+      }
 
-      runCommand(cmd, projectPath, `Manual run ${schedule.name}`, () => {});
+      runCommand(built.cmd, projectPath, `Manual run ${schedule.name}`, () => {});
 
       log.info(`[schedule] Manual run triggered: ${schedule.name} (session ${sessionId})`);
       return { ok: true, sessionId };
