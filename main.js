@@ -8,6 +8,7 @@ const log = require('electron-log');
 // getFolderIndexMtimeMs moved to session-cache.js
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
 const { fetchAndTransformUsage } = require('./claude-auth');
+const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -298,6 +299,8 @@ ipcMain.handle('add-project', (_event, projectPath) => {
     const stat = fs.statSync(projectPath);
     if (!stat.isDirectory()) return { error: 'Path is not a directory' };
 
+    addAllowedRoot(projectPath);
+
     // Unhide if previously hidden
     const global = getSetting('global') || {};
     if (global.hiddenProjects && global.hiddenProjects.includes(projectPath)) {
@@ -366,8 +369,10 @@ ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedConten
 });
 
 ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
+  const check = assertPathAllowed(filePath, 'read');
+  if (!check.ok) return { ok: false, error: check.error };
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const content = fs.readFileSync(check.resolved, 'utf8');
     return { ok: true, content };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -375,10 +380,11 @@ ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
 });
 
 ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
+  const check = assertPathAllowed(filePath, 'write');
+  if (!check.ok) return { ok: false, error: check.error };
   try {
-    const resolved = path.resolve(filePath);
-    if (!fs.existsSync(resolved)) return { ok: false, error: 'File does not exist' };
-    fs.writeFileSync(resolved, content, 'utf8');
+    if (!fs.existsSync(check.resolved)) return { ok: false, error: 'File does not exist' };
+    fs.writeFileSync(check.resolved, content, 'utf8');
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -677,6 +683,7 @@ ipcMain.handle('get-memories', () => {
       for (const folder of folders) {
         const folderPath = path.join(PROJECTS_DIR, folder);
         const projectPath = deriveProjectPath(folderPath, folder);
+        if (projectPath) addAllowedRoot(projectPath);
         if (projectPath && hiddenProjects.has(projectPath)) continue;
 
         // Use same 2-deep short path as Sessions tab (e.g. "dev/MyClaude")
@@ -773,12 +780,11 @@ ipcMain.handle('get-memories', () => {
 
 // --- IPC: read-memory ---
 ipcMain.handle('read-memory', (_event, filePath) => {
+  const check = assertPathAllowed(filePath, 'read');
+  if (!check.ok) return '';
+  if (!check.resolved.endsWith('.md')) return '';
   try {
-    const resolved = path.resolve(filePath);
-    // Allow paths under ~/.claude/ or any .md file that exists
-    if (!resolved.endsWith('.md')) return '';
-    if (!resolved.startsWith(CLAUDE_DIR) && !fs.existsSync(resolved)) return '';
-    return fs.readFileSync(resolved, 'utf8');
+    return fs.readFileSync(check.resolved, 'utf8');
   } catch (err) {
     console.error('Error reading memory file:', err);
     return '';
@@ -787,11 +793,12 @@ ipcMain.handle('read-memory', (_event, filePath) => {
 
 // --- IPC: save-memory ---
 ipcMain.handle('save-memory', (_event, filePath, content) => {
+  const check = assertPathAllowed(filePath, 'write');
+  if (!check.ok) return { ok: false, error: check.error };
+  if (!check.resolved.endsWith('.md')) return { ok: false, error: 'not a .md file' };
   try {
-    const resolved = path.resolve(filePath);
-    if (!resolved.endsWith('.md')) return { ok: false, error: 'not a .md file' };
-    if (!fs.existsSync(resolved)) return { ok: false, error: 'file does not exist' };
-    fs.writeFileSync(resolved, content, 'utf8');
+    if (!fs.existsSync(check.resolved)) return { ok: false, error: 'file does not exist' };
+    fs.writeFileSync(check.resolved, content, 'utf8');
     return { ok: true };
   } catch (err) {
     console.error('Error saving memory file:', err);
@@ -958,6 +965,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
   if (!fs.existsSync(projectPath)) {
     return { ok: false, error: `project directory no longer exists: ${projectPath}` };
   }
+  addAllowedRoot(projectPath);
 
   const isPlainTerminal = sessionOptions?.type === 'terminal';
 
@@ -1391,6 +1399,19 @@ ipcMain.handle('updater-install', () => {
 
 // --- App lifecycle ---
 app.whenReady().then(() => {
+  // Seed path-guard allowed roots from every known Claude projects folder
+  // so the file panel can read project files immediately at startup.
+  try {
+    if (fs.existsSync(PROJECTS_DIR)) {
+      for (const folder of fs.readdirSync(PROJECTS_DIR)) {
+        try {
+          const pp = deriveProjectPath(path.join(PROJECTS_DIR, folder), folder);
+          if (pp) addAllowedRoot(pp);
+        } catch {}
+      }
+    }
+  } catch {}
+
   buildMenu();
   createWindow();
   startProjectsWatcher();
