@@ -10,6 +10,7 @@
     "test": "node --test",
     "electron": "electron .",
     "bundle:codemirror": "esbuild public/codemirror-setup.js --bundle --outfile=public/codemirror-bundle.js --format=iife --platform=browser --minify",
+    "seed-agent-teams-demo": "node scripts/seed-agent-teams-demo.js",
     "generate-icons": "node scripts/generate-icons.js && node scripts/generate-dmg-background.js",
     "apply-branding": "node scripts/apply-branding.js",
     "build": "npm run bundle:codemirror && npm run apply-branding && electron-builder --config electron-builder-config.json",

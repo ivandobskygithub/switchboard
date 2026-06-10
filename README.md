@@ -37,6 +37,23 @@ This fork exists because upstream's design center is the individual developer on
 
 ## Core features
 
+### Agent Teams — multi-model orchestration
+Plan a build with a strong model, then have cheaper/local models implement and
+review it in parallel — fully automated after planning, fully visible on a
+kanban board. Cost scales with task complexity via model tiers (e.g. local Qwen
+for trivial tasks, Opus for critical ones). See
+**[docs/agent-teams/README.md](docs/agent-teams/README.md)**.
+
+```bash
+# Populate the Agent Teams tab with a demo run (no tokens spent):
+node scripts/seed-agent-teams-demo.js /path/to/a/git/project
+```
+
+Docs: [overview](docs/agent-teams/README.md) ·
+[configuration](docs/agent-teams/CONFIGURATION.md) ·
+[extending](docs/agent-teams/EXTENDING.md) ·
+[roadmap & gaps](docs/agent-teams/ROADMAP.md).
+
 ### Session management
 - Browse, launch, resume, and fork Claude Code sessions across projects
 - Full-text search across session history (titles, summaries, and message content)

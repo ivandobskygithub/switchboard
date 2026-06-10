@@ -1,6 +1,15 @@
 # Switchboard Agent Teams — Design & Implementation Plan
 
-**Status:** accepted, implementation in progress · **Date:** 2026-06-10
+**Status:** implemented & hardened · **Date:** 2026-06-10
+
+> **This is the original design/planning document.** For user-facing docs on the
+> shipped feature, see **[../agent-teams/README.md](../agent-teams/README.md)**
+> (overview), [CONFIGURATION](../agent-teams/CONFIGURATION.md),
+> [EXTENDING](../agent-teams/EXTENDING.md), and [ROADMAP](../agent-teams/ROADMAP.md).
+> What shipped also includes complexity-tiered model routing, a file-overlap
+> concurrency guard, crash-recovery sweeps, startup auto-install of the agent
+> pack, and a demo seed (`scripts/seed-agent-teams-demo.js`) — beyond the
+> original plan below.
 
 > **Revisions (post-review, 2026-06-10):**
 > 1. **Full automation is the default.** After `/sb-plan` finishes, no human input is required at the
