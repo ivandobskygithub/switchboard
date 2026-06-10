@@ -133,6 +133,9 @@ class OrchSpawner {
     this._persistStatusAliases(projectPath, run, tasks);
     // Stop-loss: if spend crossed a cap, pause the run before any new spawn.
     if (this._enforceBudget(projectPath, run, tasks, policy)) return true;
+    // Aggregate reviews BEFORE the stale sweep: a completable review must
+    // finish even though its (headless) reviewer sessions have exited.
+    acted = this._aggregateReviews(projectPath, run, tasks) || acted;
     acted = this._sweepStaleTasks(projectPath, run, tasks) || acted;
     acted = this._auditProtocol(projectPath, run, tasks) || acted;
     acted = this._blockCycles(projectPath, run, tasks) || acted;
@@ -237,37 +240,49 @@ class OrchSpawner {
   // task to a re-dispatchable state.
 
   _sweepStaleTasks(projectPath, run, tasks) {
+    // spawning/in_progress recover on SESSION liveness (a dead worker means
+    // the work stopped). `reviewing` is different: headless lens reviewers
+    // are EXPECTED to exit after writing their verdict files, so liveness is
+    // the wrong signal — _aggregateReviews completes a healthy review. A
+    // reviewing task is only stuck if its verdict files never appear; that's
+    // checked by file presence, not session liveness, to avoid re-dispatching
+    // a review that simply hasn't been aggregated yet.
     const RECOVERY = {
       spawning: { to: 'ready', patch: { pendingSessionId: null }, event: 'stale-spawn-recovered' },
       in_progress: { to: 'failed', patch: { failReason: 'worker session ended without completing the task' }, event: 'worker-died' },
-      reviewing: { to: 'needs_review', patch: {}, event: 'reviewer-died' },
     };
     let acted = false;
     const liveKeys = new Set();
+    const reviewsDir = path.join(proto.runDir(projectPath, run.id), 'reviews');
     for (const task of tasks) {
-      const rec = RECOVERY[task.status];
-      if (!rec) continue;
-      const sid = task.status === 'reviewing'
-        ? (task.reviewSessionIds || []).slice(-1)[0]
-        : (task.pendingSessionId || (task.sessionIds || []).slice(-1)[0]);
-      const key = `${projectPath}|${run.id}|${task.id}|${task.status}`;
-      if (sid && this.deps.isSessionActive(sid)) {
-        this._staleSince.delete(key);
-        continue;
+      let stuck, key, rec, sid = null;
+      if (task.status === 'reviewing') {
+        // Stuck only if a pending-lens verdict file is still missing.
+        const round = task.reviewRound || 1;
+        const lenses = Array.isArray(task.pendingLenses) ? task.pendingLenses : [];
+        const missing = lenses.filter(l => !fs.existsSync(path.join(reviewsDir, `${task.id}-${l}-${round}.md`)));
+        if (lenses.length === 0 || missing.length === 0) continue; // aggregation will finish it
+        stuck = true;
+        key = `${projectPath}|${run.id}|${task.id}|reviewing|${round}`;
+        rec = { to: 'needs_review', patch: { pendingLenses: [] }, event: 'review-stuck' };
+      } else {
+        rec = RECOVERY[task.status];
+        if (!rec) continue;
+        sid = task.pendingSessionId || (task.sessionIds || []).slice(-1)[0];
+        key = `${projectPath}|${run.id}|${task.id}|${task.status}`;
+        if (sid && this.deps.isSessionActive(sid)) { this._staleSince.delete(key); continue; }
+        stuck = true;
       }
       liveKeys.add(key);
       const first = this._staleSince.get(key);
-      if (!first) {
-        this._staleSince.set(key, Date.now());
-        continue;
-      }
+      if (!first) { this._staleSince.set(key, Date.now()); continue; }
       if (Date.now() - first < this.staleGraceMs) continue;
       this._staleSince.delete(key);
       const r = proto.transitionTask(projectPath, run.id, task.id, task.status, rec.to, rec.patch);
       if (r.ok) {
         acted = true;
-        proto.appendEvent(projectPath, run.id, { type: rec.event, task: task.id, sessionId: sid || null });
-        this.log.warn(`[orch] ${run.id}/${task.id}: no live session in status ${task.status} → ${rec.to}`);
+        proto.appendEvent(projectPath, run.id, { type: rec.event, task: task.id, sessionId: sid });
+        this.log.warn(`[orch] ${run.id}/${task.id}: stuck in ${task.status} → ${rec.to}`);
       }
     }
     // Drop bookkeeping for tasks that moved on (status changed / task done).
@@ -527,17 +542,18 @@ class OrchSpawner {
 
   // One resolver for the session options of every dispatch path, so policy
   // decisions (permission mode, protocol access, MCP) can't drift apart.
-  _sessionOptions(projectPath, run, task, role, cwd, initialPrompt) {
+  _sessionOptions(projectPath, run, task, role, cwd, initialPrompt, extraSystemPrompt) {
     const roleCfg = this._roleCfg(run, role);
     // Model profile is resolved per task: explicit task override → the run's
     // tier for this task's complexity → the role default. This is the knob
     // that routes leaf tasks to cheap/local models and hard ones to Opus.
     const profileId = proto.resolveProfile(run, task, role);
+    const base = this.deps.rolePrompt(role, run, projectPath, task) || '';
     return {
       profileId: profileId || undefined,
       permissionMode: roleCfg.permissionMode || 'acceptEdits',
       initialPrompt,
-      appendSystemPrompt: this.deps.rolePrompt(role, run, projectPath, task) || undefined,
+      appendSystemPrompt: (extraSystemPrompt ? `${base}\n\n${extraSystemPrompt}` : base) || undefined,
       mcpEmulation: false,
       // Worktree sessions need access to the protocol files, which live
       // outside the worktree subtree (.switchboard/runs, guidelines.md).
@@ -555,7 +571,7 @@ class OrchSpawner {
     return { ok: true, cwd: w.path, worktree: w.path, branch: w.branch };
   }
 
-  async _spawnSession(projectPath, run, task, role, cwd, initialPrompt, sessionId) {
+  async _spawnSession(projectPath, run, task, role, cwd, initialPrompt, sessionId, extraSystemPrompt) {
     const seeded = this.deps.seedSessionJsonl({
       sessionId,
       cwd,
@@ -563,7 +579,7 @@ class OrchSpawner {
       text: `**Agent Teams ${role}** — run \`${run.id}\`, task \`${task.id}\`: ${task.title}`,
     });
     const res = await this.deps.openTerminal(sessionId, cwd, !seeded,
-      this._sessionOptions(projectPath, run, task, role, cwd, initialPrompt));
+      this._sessionOptions(projectPath, run, task, role, cwd, initialPrompt, extraSystemPrompt));
     if (!res || !res.ok) {
       return { ok: false, error: (res && res.error) || 'openTerminal failed' };
     }
@@ -620,9 +636,15 @@ class OrchSpawner {
     const prep = await this._prepareCwd(projectPath, run, policy, task);
     if (!prep.ok) return this._spawnFailed(projectPath, run, task, `worktree: ${prep.error}`);
 
-    const lastReview = (task.reviews || []).slice(-1)[0];
-    const prompt = `/sb-work ${run.id} ${task.id} — the reviewer requested changes` +
-      (lastReview?.file ? `; read ${lastReview.file} and address every point` : '');
+    // Point the worker at every lens review that asked for changes in the
+    // most recent round (multi-lens), or the last single review.
+    const lastRound = Math.max(0, ...(task.reviews || []).map(r => r.round || 0));
+    const rejected = (task.reviews || [])
+      .filter(r => r.verdict === 'changes_requested' && (lastRound === 0 || r.round === lastRound) && r.file)
+      .map(r => r.file);
+    const files = rejected.length ? rejected : (task.reviews || []).slice(-1).map(r => r.file).filter(Boolean);
+    const prompt = `/sb-work ${run.id} ${task.id} — the reviewers requested changes` +
+      (files.length ? `; read ${files.join(' and ')} and address every point` : '');
 
     // Prefer feeding the rework into the still-alive worker session (its
     // context is intact); a failed PTY write falls through to a resume.
@@ -654,34 +676,113 @@ class OrchSpawner {
     return true;
   }
 
+  // Multi-lens review: each applicable lens (spec, functionality, tests,
+  // security, style — depth scales with complexity) becomes its OWN reviewer
+  // session with a focused prompt, possibly a different model. Each writes its
+  // own verdict file; Switchboard aggregates them deterministically
+  // (_aggregateReviews) — the lens agents never set the task status, so N
+  // concurrent reviewers never race on the task file.
   async _dispatchReviewer(projectPath, run, policy, task) {
-    // The review session id goes into the SAME write as the status change,
-    // so there is no read-modify-write window racing other writers.
-    const sessionId = this.deps.newSessionId();
+    const lenses = proto.resolveLenses(run, task);
+
+    // Review disabled → auto-approve (explicit opt-out only).
+    if (lenses.length === 0) {
+      const r = proto.transitionTask(projectPath, run.id, task.id, 'needs_review', 'approved',
+        { reviews: [...(task.reviews || []), { verdict: 'approved', autoApproved: true }] });
+      if (r.ok) proto.appendEvent(projectPath, run.id, { type: 'review-skipped', task: task.id });
+      return r.ok;
+    }
+
+    const round = (task.reviewRound || 0) + 1;
     const tr = proto.transitionTask(projectPath, run.id, task.id, 'needs_review', 'reviewing',
-      { reviewSessionIds: [...(task.reviewSessionIds || []), sessionId] });
+      { reviewRound: round, pendingLenses: lenses, reviewSessionIds: task.reviewSessionIds || [] });
     if (!tr.ok) return false;
 
-    const rollback = (error) => {
-      proto.transitionTask(projectPath, run.id, task.id, 'reviewing', 'needs_review',
-        { reviewSessionIds: task.reviewSessionIds || [] });
-      proto.appendEvent(projectPath, run.id, { type: 'review-spawn-failed', task: task.id, error });
-      this.log.warn(`[orch] reviewer spawn failed for ${run.id}/${task.id}: ${error}`);
-      return false;
-    };
-
-    // Reviewers work in the task's worktree (the branch under review).
     const prep = await this._prepareCwd(projectPath, run, policy, task);
-    if (!prep.ok) return rollback(prep.error);
-    const spawn = await this._spawnSession(projectPath, run, task, 'reviewer', prep.cwd,
-      `/sb-review ${run.id} ${task.id}`, sessionId);
-    if (!spawn.ok) return rollback(spawn.error);
+    if (!prep.ok) {
+      proto.transitionTask(projectPath, run.id, task.id, 'reviewing', 'needs_review', { pendingLenses: [] });
+      proto.appendEvent(projectPath, run.id, { type: 'review-spawn-failed', task: task.id, error: prep.error });
+      return false;
+    }
 
-    proto.appendEvent(projectPath, run.id, {
-      type: 'reviewer-spawned', task: task.id, sessionId,
-    });
-    this.log.info(`[orch] reviewer spawned for ${run.id}/${task.id} (${sessionId})`);
+    const spawnedLenses = [];
+    const sessionIds = [...(task.reviewSessionIds || [])];
+    for (const lens of lenses) {
+      const sessionId = this.deps.newSessionId();
+      const meta = proto.REVIEW_LENSES[lens];
+      const extra = `## Your review lens: ${meta.label}\n${meta.focus}\n\n` +
+        `Write your verdict to \`../../runs/${run.id}/reviews/${task.id}-${lens}-${round}.md\` ` +
+        `starting with a line \`Verdict: approved\` or \`Verdict: changes_requested\`, then your findings. ` +
+        `Do NOT edit the task JSON or its status — Switchboard aggregates the lenses. Do NOT modify code.`;
+      const spawn = await this._spawnSession(projectPath, run, task, 'reviewer', prep.cwd,
+        `/sb-review ${run.id} ${task.id} ${lens}`, sessionId, extra);
+      if (spawn.ok) {
+        spawnedLenses.push(lens);
+        sessionIds.push(sessionId);
+        proto.appendEvent(projectPath, run.id, { type: 'reviewer-spawned', task: task.id, sessionId, lens });
+      } else {
+        proto.appendEvent(projectPath, run.id, { type: 'review-spawn-failed', task: task.id, lens, error: spawn.error });
+      }
+    }
+
+    if (spawnedLenses.length === 0) {
+      proto.transitionTask(projectPath, run.id, task.id, 'reviewing', 'needs_review', { pendingLenses: [] });
+      return false;
+    }
+    // Only require the lenses that actually spawned (a failed lens shouldn't
+    // wedge aggregation; the timeline records the gap).
+    const cur = proto.readTask(projectPath, run.id, task.id);
+    if (cur && cur.status === 'reviewing' && cur.reviewRound === round) {
+      proto.writeTask(projectPath, run.id, { ...cur, pendingLenses: spawnedLenses, reviewSessionIds: sessionIds });
+    }
+    this.log.info(`[orch] ${spawnedLenses.length}-lens review dispatched for ${run.id}/${task.id} (round ${round}): ${spawnedLenses.join(', ')}`);
     return true;
+  }
+
+  // Aggregate the per-lens verdict files for tasks under review. Once every
+  // pending lens for the current round has a parseable verdict, decide the
+  // task: approved if approvals ≥ quorum (default: all lenses), else
+  // changes_requested. This write is Switchboard's alone — single writer.
+  _aggregateReviews(projectPath, run, tasks) {
+    let acted = false;
+    const reviewsDir = path.join(proto.runDir(projectPath, run.id), 'reviews');
+    for (const task of tasks) {
+      if (task.status !== 'reviewing') continue;
+      const lenses = Array.isArray(task.pendingLenses) ? task.pendingLenses : [];
+      if (lenses.length === 0) continue;
+      const round = task.reviewRound || 1;
+      const verdicts = {};
+      let allIn = true;
+      for (const lens of lenses) {
+        const file = `${task.id}-${lens}-${round}.md`;
+        let text = null;
+        try { text = fs.readFileSync(path.join(reviewsDir, file), 'utf8'); } catch {}
+        const v = text != null ? proto.parseVerdict(text) : null;
+        if (!v) { allIn = false; break; }
+        verdicts[lens] = { lens, file: `reviews/${file}`, verdict: v };
+      }
+      if (!allIn) continue;
+
+      const approvals = Object.values(verdicts).filter(v => v.verdict === 'approved').length;
+      const quorum = proto.lensQuorum(run, lenses.length);
+      const passed = approvals >= quorum;
+      const fresh = proto.readTask(projectPath, run.id, task.id);
+      if (!fresh || fresh.status !== 'reviewing' || fresh.reviewRound !== round) continue;
+      const reviewEntries = Object.values(verdicts).map(v => ({ file: v.file, verdict: v.verdict, lens: v.lens, round }));
+      const next = proto.transitionTask(projectPath, run.id, task.id, 'reviewing',
+        passed ? 'approved' : 'changes_requested',
+        { reviews: [...(fresh.reviews || []), ...reviewEntries], pendingLenses: [] });
+      if (next.ok) {
+        acted = true;
+        const summary = Object.values(verdicts).map(v => `${v.lens}:${v.verdict === 'approved' ? '✓' : '✗'}`).join(' ');
+        proto.appendEvent(projectPath, run.id, {
+          type: passed ? 'review-approved' : 'review-changes-requested',
+          task: task.id, text: `${approvals}/${lenses.length} lenses approved (${summary})`,
+        });
+        this.log.info(`[orch] review aggregated for ${run.id}/${task.id}: ${passed ? 'approved' : 'changes_requested'} (${summary})`);
+      }
+    }
+    return acted;
   }
 
   _spawnFailed(projectPath, run, task, error) {

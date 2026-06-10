@@ -52,7 +52,8 @@ function main() {
       critical: { profileId: 'anthropic-opus', reviewerProfileId: 'anthropic-opus', maxConcurrent: 1 },
     },
     // Demo only: don't let a running Switchboard try to spawn real sessions.
-    policy: { autoSpawnWorkers: false, autoSpawnReviewers: false, autoMerge: false },
+    policy: { autoSpawnWorkers: false, autoSpawnReviewers: false, autoMerge: false,
+      validateCmd: 'npm test', maxBudgetUsd: 5 },
   });
   if (!created.ok) {
     console.error(`Failed to create demo run: ${created.error}`);
@@ -119,8 +120,8 @@ function main() {
 
   // Tasks spanning every board column + a spread of complexity tiers.
   const tasks = [
-    { id: 'C-01', title: 'Limiter core', kind: 'chunk', status: 'done' },
-    { id: 'C-02', title: 'Middleware + integration', kind: 'chunk', status: 'in_progress', dependsOn: ['C-01'] },
+    { id: 'C-01', title: 'Limiter core', kind: 'chunk', status: 'done', validateCmd: 'npm test -- limiter' },
+    { id: 'C-02', title: 'Middleware + integration', kind: 'chunk', status: 'in_progress', dependsOn: ['C-01'], validateCmd: 'npm test' },
 
     { id: 'T-101', title: 'Token-bucket limiter core', kind: 'leaf', parent: 'C-01', status: 'done',
       complexity: 'high', spec: 'tasks/T-101.spec.md', filesHint: ['src/ratelimit/bucket.js', 'test/ratelimit/bucket.test.js'],
@@ -133,11 +134,19 @@ function main() {
 
     { id: 'T-103', title: 'Rate-limit middleware', kind: 'leaf', parent: 'C-02', status: 'changes_requested',
       complexity: 'high', filesHint: ['src/ratelimit/middleware.js'], dependsOn: ['T-101'], attempts: 1,
-      sessionIds: [uuid()], reviews: [{ file: 'reviews/T-103-1.md', verdict: 'changes_requested' }] },
+      sessionIds: [uuid()], reviewRound: 1,
+      reviews: [
+        { file: 'reviews/T-103-spec-1.md', verdict: 'approved', lens: 'spec', round: 1 },
+        { file: 'reviews/T-103-functionality-1.md', verdict: 'approved', lens: 'functionality', round: 1 },
+        { file: 'reviews/T-103-security-1.md', verdict: 'changes_requested', lens: 'security', round: 1 },
+        { file: 'reviews/T-103-tests-1.md', verdict: 'changes_requested', lens: 'tests', round: 1 },
+        { file: 'reviews/T-103-style-1.md', verdict: 'approved', lens: 'style', round: 1 },
+      ] },
 
     { id: 'T-104', title: 'Wire middleware into public router', kind: 'leaf', parent: 'C-02', status: 'reviewing',
       complexity: 'medium', filesHint: ['src/routes/public.js'], dependsOn: ['T-103'], attempts: 1,
-      sessionIds: [uuid()], reviewSessionIds: [uuid()] },
+      sessionIds: [uuid()], reviewSessionIds: [uuid(), uuid(), uuid()],
+      reviewRound: 1, pendingLenses: ['spec', 'functionality', 'tests', 'style'] },
 
     { id: 'T-105', title: '429 integration test', kind: 'leaf', parent: 'C-02', status: 'in_progress',
       complexity: 'medium', filesHint: ['test/ratelimit/e2e.test.js'], attempts: 1, sessionIds: [uuid()] },

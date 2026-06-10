@@ -46,6 +46,69 @@ const COMPLEXITIES = ['trivial', 'low', 'medium', 'high', 'critical'];
 const DEFAULT_COMPLEXITY = 'medium';
 const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/; // matches profiles.js ID_RE
 
+// Review lenses — the distinct concerns a review can cover. Each becomes a
+// separate reviewer session (possibly a different model) with a focused
+// prompt, and writes its own verdict file. Switchboard aggregates them.
+const REVIEW_LENSES = {
+  spec:          { label: 'spec/PRD/goal conformance', focus: 'Does the change do EXACTLY what the task spec, acceptance criteria, and the run goal require? Flag anything missing, hard-coded, faked, or scope-crept.' },
+  functionality: { label: 'functionality & integration', focus: 'Correctness, edge cases, error handling, race conditions; and does it integrate cleanly without breaking existing callers elsewhere in the repo?' },
+  tests:         { label: 'test coverage', focus: 'Do tests exist, assert real behaviour (not mock echo), and fail if the change is reverted? Are the important paths and edge cases covered?' },
+  security:      { label: 'vulnerability', focus: 'Injection, path traversal, secrets in code/logs, unsafe input handling, authn/authz, unsafe dependencies.' },
+  style:         { label: 'code style & maintainability', focus: 'Matches guidelines.md and the surrounding code: naming, duplication, dead code, complexity, comment quality.' },
+};
+const LENS_KEYS = Object.keys(REVIEW_LENSES);
+const LENS_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+// Cost-aware default: more lenses for harder tasks. The cheap path stays
+// cheap (one combined review for trivial work); critical work gets all five.
+const DEFAULT_LENSES_BY_COMPLEXITY = {
+  trivial:  ['functionality', 'style'],
+  low:      ['functionality', 'tests', 'style'],
+  medium:   ['spec', 'functionality', 'tests', 'style'],
+  high:     ['spec', 'functionality', 'tests', 'security', 'style'],
+  critical: ['spec', 'functionality', 'tests', 'security', 'style'],
+};
+
+// Which lenses to apply to a task. Precedence: per-task `lenses` → run-level
+// `review.lensesByComplexity[tier]` → run-level `review.lenses` (flat) →
+// the cost-aware default for the tier. Returns [] only if review is disabled.
+function resolveLenses(run, task) {
+  const tier = taskComplexity(task);
+  const review = (run && isPlainObject(run.review)) ? run.review : {};
+  if (review.enabled === false) return [];
+  let lenses;
+  if (Array.isArray(task && task.lenses)) lenses = task.lenses;
+  else if (review.lensesByComplexity && Array.isArray(review.lensesByComplexity[tier])) lenses = review.lensesByComplexity[tier];
+  else if (Array.isArray(review.lenses)) lenses = review.lenses;
+  else lenses = DEFAULT_LENSES_BY_COMPLEXITY[tier] || ['functionality', 'tests', 'style'];
+  // keep only known lens keys, dedup, preserve order
+  const seen = new Set();
+  const out = [];
+  for (const l of lenses) {
+    if (LENS_KEYS.includes(l) && !seen.has(l)) { seen.add(l); out.push(l); }
+  }
+  return out.length ? out : ['functionality'];
+}
+
+// How many lens approvals are needed. review.quorum: 'all' (default) or an
+// integer N (at least N of the applied lenses must approve, and none may have
+// a hard blocker). Returns the integer threshold for a given lens count.
+function lensQuorum(run, lensCount) {
+  const q = run && isPlainObject(run.review) ? run.review.quorum : undefined;
+  if (Number.isInteger(q) && q > 0) return Math.min(q, lensCount);
+  return lensCount; // 'all'
+}
+
+// Parse a verdict from a review markdown file's text.
+function parseVerdict(text) {
+  if (typeof text !== 'string') return null;
+  const m = text.match(/verdict[\s:*_\-–—]*(approved|changes[_\s-]?requested|approve|reject(?:ed)?|block(?:ed)?)/i);
+  if (!m) return null;
+  const v = m[1].toLowerCase().replace(/[\s_-]+/g, '_');
+  if (v.startsWith('approve')) return 'approved';
+  return 'changes_requested';
+}
+
 // Task status machine. Keys are "from" statuses; values are the set of
 // legal "to" statuses. The conventional owner of each transition is noted —
 // not enforceable on a shared filesystem, but Switchboard validates every
@@ -173,6 +236,22 @@ function validateRun(run) {
       return 'invalid policy.validateCmd';
     }
   }
+  if (run.review !== undefined) {
+    if (!isPlainObject(run.review)) return 'review must be an object';
+    if (run.review.lenses !== undefined && (!Array.isArray(run.review.lenses) || run.review.lenses.some(l => !LENS_KEYS.includes(l)))) {
+      return 'invalid review.lenses';
+    }
+    if (run.review.lensesByComplexity !== undefined) {
+      if (!isPlainObject(run.review.lensesByComplexity)) return 'invalid review.lensesByComplexity';
+      for (const [k, v] of Object.entries(run.review.lensesByComplexity)) {
+        if (!COMPLEXITIES.includes(k)) return `invalid review tier: ${k}`;
+        if (!Array.isArray(v) || v.some(l => !LENS_KEYS.includes(l))) return `invalid lenses for tier ${k}`;
+      }
+    }
+    if (run.review.quorum !== undefined && run.review.quorum !== 'all' && !(Number.isInteger(run.review.quorum) && run.review.quorum > 0)) {
+      return 'invalid review.quorum';
+    }
+  }
   if (run.tiers !== undefined) {
     if (!isPlainObject(run.tiers)) return 'tiers must be an object';
     for (const [name, cfg] of Object.entries(run.tiers)) {
@@ -218,6 +297,9 @@ function validateTask(task) {
   }
   if (task.validateCmd !== undefined && task.validateCmd !== null && typeof task.validateCmd !== 'string') {
     return 'validateCmd must be a string';
+  }
+  if (task.lenses !== undefined && (!Array.isArray(task.lenses) || task.lenses.some(l => !LENS_KEYS.includes(l)))) {
+    return 'invalid task.lenses';
   }
   return null;
 }
@@ -439,7 +521,7 @@ function newRunId(title) {
 
 // Creates the directory skeleton + run.json for a new run. Roles must map
 // role name → { profileId, maxConcurrent? }. Returns { ok, run, dir }.
-function createRun(projectPath, { title, goal, roles, policy, integrationBranch, tiers }) {
+function createRun(projectPath, { title, goal, roles, policy, integrationBranch, tiers, review }) {
   if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'title required' };
   if (!isPlainObject(roles) || !roles.master || !roles.worker || !roles.reviewer) {
     return { ok: false, error: 'roles must define master, worker and reviewer' };
@@ -479,6 +561,20 @@ function createRun(projectPath, { title, goal, roles, policy, integrationBranch,
       if (Object.keys(entry).length) cleaned[name] = entry;
     }
     if (Object.keys(cleaned).length) run.tiers = cleaned;
+  }
+  if (isPlainObject(review)) {
+    const r = {};
+    if (review.enabled === false) r.enabled = false;
+    if (Array.isArray(review.lenses)) r.lenses = review.lenses.filter(l => LENS_KEYS.includes(l));
+    if (isPlainObject(review.lensesByComplexity)) {
+      const lbc = {};
+      for (const k of COMPLEXITIES) {
+        if (Array.isArray(review.lensesByComplexity[k])) lbc[k] = review.lensesByComplexity[k].filter(l => LENS_KEYS.includes(l));
+      }
+      if (Object.keys(lbc).length) r.lensesByComplexity = lbc;
+    }
+    if (review.quorum === 'all' || (Number.isInteger(review.quorum) && review.quorum > 0)) r.quorum = review.quorum;
+    if (Object.keys(r).length) run.review = r;
   }
   const err = validateRun(run);
   if (err) return { ok: false, error: err };
@@ -555,6 +651,7 @@ module.exports = {
   readJsonSafe, writeJsonAtomic,
   validateRun, validateTask, normalizeFileHint, canonicalStatus, STATUS_ALIASES,
   COMPLEXITIES, DEFAULT_COMPLEXITY, resolveProfile, tierCap, taskComplexity,
+  REVIEW_LENSES, LENS_KEYS, DEFAULT_LENSES_BY_COMPLEXITY, resolveLenses, lensQuorum, parseVerdict,
   listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,

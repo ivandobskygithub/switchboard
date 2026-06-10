@@ -120,9 +120,14 @@ test('concurrency cap and dependency gating are respected', async () => {
   }
 });
 
-test('needs_review spawns a reviewer with the reviewer profile', async () => {
+test('needs_review spawns lens reviewers with the reviewer profile', async () => {
   const project = tmpProject();
-  const run = makeActiveRun(project);
+  // single lens keeps this focused; multi-lens is covered in orch-review
+  const { run: base } = proto.createRun(project, {
+    title: 'demo', roles: ROLES, policy: { isolation: 'none' }, review: { lenses: ['functionality'] },
+  });
+  proto.writeRun(project, { ...base, status: 'active', masterSessionId: 'master-1111-2222-3333-444444444444' });
+  const run = proto.readRun(project, base.id);
   proto.writeTask(project, run.id, {
     id: 'T-1', title: 'a', status: 'needs_review', kind: 'leaf',
     sessionIds: ['w-1'], attempts: 1,
@@ -136,9 +141,10 @@ test('needs_review spawns a reviewer with the reviewer profile', async () => {
     await spawner.reconcile(project);
     assert.equal(calls.openTerminal.length, 1);
     assert.equal(calls.openTerminal[0].opts.profileId, 'anthropic');
-    assert.equal(calls.openTerminal[0].opts.initialPrompt, `/sb-review ${run.id} T-1`);
+    assert.equal(calls.openTerminal[0].opts.initialPrompt, `/sb-review ${run.id} T-1 functionality`);
     const task = proto.readTask(project, run.id, 'T-1');
     assert.equal(task.status, 'reviewing');
+    assert.deepEqual(task.pendingLenses, ['functionality']);
     assert.equal(task.reviewSessionIds.length, 1);
   } finally {
     spawner.stop();

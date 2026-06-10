@@ -63,8 +63,12 @@ test('LIVE: a real small-model worker and reviewer drive one task through the pr
       roles: {
         master: { profileId: null },
         worker: { profileId: null, maxConcurrent: 1 },
-        reviewer: { profileId: null, maxConcurrent: 1 },
+        reviewer: { profileId: null, maxConcurrent: 2 },
       },
+      // Two lenses the trivial task can actually satisfy (a `tests` lens
+      // would correctly reject a file-creation task with no tests and loop
+      // rework forever — that's right behaviour, wrong fixture).
+      review: { lenses: ['spec', 'functionality'] },
     });
     assert.equal(created.ok, true);
     const run = { ...created.run, status: 'active', masterSessionId: null };
@@ -106,7 +110,7 @@ test('LIVE: a real small-model worker and reviewer drive one task through the pr
       openTerminal: async (sessionId, cwd, _isNew, opts) => {
         const cmd = `claude -p ${shq(opts.initialPrompt)} --session-id ${shq(sessionId)}` +
           ` --permission-mode acceptEdits --model ${shq(MODEL)}` +
-          ` --allowed-tools 'Bash,Read,Write,Edit,Glob,Grep'` +
+          ` --allowed-tools 'Bash,Read,Write,Edit,Glob,Grep,Task'` +
           (opts.addDirs ? ` --add-dir ${shq(opts.addDirs)}` : '') +
           (opts.appendSystemPrompt ? ` --append-system-prompt ${shq(opts.appendSystemPrompt)}` : '');
         fs.appendFileSync(logFile, `\n--- spawn ${sessionId} in ${cwd}\n${cmd}\n`);
@@ -164,11 +168,15 @@ test('LIVE: a real small-model worker and reviewer drive one task through the pr
       // The protocol round-trip happened: worker → needs_review → reviewer verdict.
       assert.ok(events.some(e => e.type === 'worker-spawned'));
       assert.ok(events.some(e => e.type === 'reviewer-spawned'));
-      assert.equal((task.reviews || []).length >= 1, true, 'reviewer must record a verdict');
-      const reviewFile = path.join(proto.runDir(project, run.id), task.reviews[0].file);
-      assert.ok(fs.existsSync(reviewFile), 'review markdown written');
-      assert.ok(['approved', 'changes_requested'].includes(task.reviews[0].verdict),
-        `verdict must be approved or changes_requested (got ${task.reviews[0].verdict})`);
+      // Multi-lens: both lenses recorded a verdict and Switchboard aggregated.
+      assert.ok((task.reviews || []).length >= 2, 'both lens verdicts recorded');
+      assert.ok(task.reviews.some(r => r.lens === 'spec') && task.reviews.some(r => r.lens === 'functionality'),
+        'both configured lenses (spec, functionality) recorded a verdict');
+      for (const r of task.reviews) {
+        assert.ok(fs.existsSync(path.join(proto.runDir(project, run.id), r.file)), `review ${r.file} written`);
+        assert.ok(['approved', 'changes_requested'].includes(r.verdict));
+      }
+      assert.ok(['approved', 'changes_requested'].includes(task.status), `aggregated status (got ${task.status})`);
     } finally {
       spawner.stop();
       watcher.dispose();

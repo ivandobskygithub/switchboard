@@ -182,7 +182,7 @@ function init(log, deps) {
     }
 
     const created = proto.createRun(resolved, {
-      title: opts?.title, goal: opts?.goal, roles: opts?.roles, policy, tiers: opts?.tiers,
+      title: opts?.title, goal: opts?.goal, roles: opts?.roles, policy, tiers: opts?.tiers, review: opts?.review,
     });
     if (!created.ok) return created;
     const { run } = created;

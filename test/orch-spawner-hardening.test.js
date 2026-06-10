@@ -165,8 +165,11 @@ test('stale sweep recovers tasks whose sessions died (worker, reviewer, spawner 
   proto.writeTask(project, run.id, {
     id: 'T-work', title: 'a', status: 'in_progress', kind: 'leaf', sessionIds: ['dead-worker'],
   });
+  // A review stuck because a lens verdict file never appeared (reviewer
+  // sessions legitimately exit, so this is file-based, not liveness-based).
   proto.writeTask(project, run.id, {
-    id: 'T-rev', title: 'b', status: 'reviewing', kind: 'leaf', reviewSessionIds: ['dead-reviewer'],
+    id: 'T-rev', title: 'b', status: 'reviewing', kind: 'leaf',
+    reviewRound: 1, pendingLenses: ['functionality'], reviewSessionIds: ['dead-reviewer'],
   });
   proto.writeTask(project, run.id, {
     id: 'T-spawn', title: 'c', status: 'spawning', kind: 'leaf', pendingSessionId: 'never-arrived', attempts: 1,
@@ -197,7 +200,7 @@ test('stale sweep recovers tasks whose sessions died (worker, reviewer, spawner 
     assert.equal(proto.readTask(project, run.id, 'T-live').status, 'in_progress', 'live session untouched');
 
     const types = proto.readEvents(project, run.id).map(e => e.type);
-    for (const expected of ['worker-died', 'reviewer-died', 'stale-spawn-recovered']) {
+    for (const expected of ['worker-died', 'review-stuck', 'stale-spawn-recovered']) {
       assert.ok(types.includes(expected), `events must include ${expected}`);
     }
   } finally {

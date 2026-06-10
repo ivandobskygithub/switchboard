@@ -79,7 +79,13 @@ function makeSandbox() {
   proto.writeTask(project, run.id, { id: 'C-01', title: 'Chunk one', status: 'in_progress', kind: 'chunk' });
   proto.writeTask(project, run.id, { id: 'T-1', title: 'Draft task', status: 'draft', kind: 'leaf', parent: 'C-01', complexity: 'trivial' });
   proto.writeTask(project, run.id, { id: 'T-2', title: 'Working task', status: 'in_progress', kind: 'leaf', parent: 'C-01', attempts: 1, sessionIds: ['bbbbbbbb-1111-2222-3333-444444444444'] });
-  proto.writeTask(project, run.id, { id: 'T-3', title: 'Reviewed task', status: 'needs_review', kind: 'leaf', parent: 'C-01', attempts: 1 });
+  proto.writeTask(project, run.id, { id: 'T-3', title: 'Reviewed task', status: 'changes_requested', kind: 'leaf', parent: 'C-01', attempts: 1,
+    complexity: 'high', reviewRound: 1, sessionIds: ['cccccccc-1111-2222-3333-444444444444'],
+    reviews: [
+      { file: 'reviews/T-3-spec-1.md', verdict: 'approved', lens: 'spec', round: 1 },
+      { file: 'reviews/T-3-security-1.md', verdict: 'changes_requested', lens: 'security', round: 1 },
+      { file: 'reviews/T-3-tests-1.md', verdict: 'approved', lens: 'tests', round: 1 },
+    ] });
   proto.writeTask(project, run.id, { id: 'T-4', title: 'Finished task', status: 'done', kind: 'leaf', parent: 'C-01', attempts: 1 });
 
   return { home, project, run };
@@ -213,6 +219,13 @@ test('Electron UI renders the Agent Teams board and applies a human action',
       assert.deepEqual(board.progress, ['T-2']);
       assert.deepEqual(board.review, ['T-3']);
       assert.deepEqual(board.done, ['T-4']);
+
+      // Multi-lens verdicts render as per-lens chips on the reviewed card.
+      const lensText = await cdp.eval(
+        `document.querySelector('.orch-card[data-task-id="T-3"] .orch-card-lenses')?.textContent || ''`);
+      assert.match(lensText, /spec ✓/);
+      assert.match(lensText, /security ✗/);
+      assert.match(lensText, /tests ✓/);
 
       // Complexity tier + resolved model is shown on the card.
       const t1Tier = await cdp.eval(

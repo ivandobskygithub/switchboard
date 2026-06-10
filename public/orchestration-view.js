@@ -27,6 +27,20 @@ function profileLabel(id) {
   return p ? p.name : id;
 }
 
+function fmtTokens(n) {
+  if (!n) return '0';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+// "12.3k tok" or "12.3k tok · $0.41" when real cost is present.
+function fmtUsage(u) {
+  if (!u || !u.found) return '';
+  const out = `${fmtTokens(u.outputTokens)} out / ${fmtTokens(u.inputTokens)} in`;
+  return u.hasCost ? `${out} · $${u.costUSD.toFixed(2)}` : out;
+}
+
 // Mirror orch-protocol resolveProfile so the board can show which model a
 // task will actually run on (explicit override → complexity tier → role).
 function resolveTaskProfile(run, task, role) {
@@ -301,6 +315,18 @@ function renderOrchHeader() {
   progress.textContent = summary ? `${summary.leavesDone}/${summary.leaves} tasks done` : '';
   controls.appendChild(progress);
 
+  // Run spend (tokens always; cost when transcripts carry it).
+  if (orchDetail.cost && orchDetail.cost.run && orchDetail.cost.run.found) {
+    const spend = document.createElement('span');
+    spend.className = 'orch-run-spend';
+    spend.textContent = '· ' + fmtUsage(orchDetail.cost.run);
+    if (run.policy && (run.policy.maxBudgetUsd || run.policy.maxOutputTokens)) {
+      const cap = run.policy.maxBudgetUsd ? `$${run.policy.maxBudgetUsd}` : `${fmtTokens(run.policy.maxOutputTokens)} tok`;
+      spend.textContent += ` / ${cap} cap`;
+    }
+    controls.appendChild(spend);
+  }
+
   for (const tab of ['board', 'plan', 'timeline']) {
     const btn = document.createElement('button');
     btn.className = 'orch-tab-btn' + (orchDetailTab === tab ? ' active' : '');
@@ -418,10 +444,33 @@ function buildOrchCard(task) {
   const bits = [];
   if (task.parent) bits.push(task.parent);
   if (task.attempts) bits.push(`attempt ${task.attempts}`);
-  if (task.reviews?.length) bits.push(`${task.reviews.length} review${task.reviews.length > 1 ? 's' : ''}`);
   if (task.blockedReason) bits.push(task.blockedReason);
+  const u = orchDetail.cost && orchDetail.cost.byTask && orchDetail.cost.byTask[task.id];
+  if (u && u.found) bits.push(fmtUsage(u));
   meta.textContent = bits.join(' · ');
   card.appendChild(meta);
+
+  // Per-lens review verdicts (multi-lens), or pending lenses while reviewing.
+  const latestRound = Math.max(0, ...(task.reviews || []).map(r => r.round || 0));
+  const lensReviews = (task.reviews || []).filter(r => r.lens && (latestRound === 0 || r.round === latestRound));
+  if (lensReviews.length || (task.pendingLenses || []).length) {
+    const lensRow = document.createElement('div');
+    lensRow.className = 'orch-card-lenses';
+    for (const r of lensReviews) {
+      const chip = document.createElement('span');
+      chip.className = `orch-lens orch-lens-${r.verdict === 'approved' ? 'ok' : 'bad'}`;
+      chip.textContent = `${r.lens} ${r.verdict === 'approved' ? '✓' : '✗'}`;
+      lensRow.appendChild(chip);
+    }
+    for (const lens of (task.pendingLenses || [])) {
+      if (lensReviews.some(r => r.lens === lens)) continue;
+      const chip = document.createElement('span');
+      chip.className = 'orch-lens orch-lens-pending';
+      chip.textContent = `${lens} …`;
+      lensRow.appendChild(chip);
+    }
+    card.appendChild(lensRow);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'orch-card-actions';
@@ -724,6 +773,34 @@ async function showNewRunDialog() {
   }
   field('Isolation', isolationSel);
 
+  // Review rigor: how many lenses each task gets reviewed through.
+  const reviewSel = document.createElement('select');
+  for (const [v, label] of [
+    ['tiered', 'Tiered by complexity (recommended — more lenses for harder tasks)'],
+    ['all', 'All lenses every task (spec, functionality, tests, security, style)'],
+    ['functionality', 'Single combined review (cheapest)'],
+    ['disabled', 'No review (auto-approve — not recommended)'],
+  ]) {
+    const opt = document.createElement('option');
+    opt.value = v; opt.textContent = label;
+    reviewSel.appendChild(opt);
+  }
+  field('Review rigor', reviewSel);
+
+  // Phase gate command (deterministic validation before a chunk completes).
+  const validateInput = document.createElement('input');
+  validateInput.type = 'text';
+  validateInput.placeholder = 'e.g. npm test  (run on the integration branch per phase)';
+  field('Default phase-gate command (optional)', validateInput);
+
+  // Budget stop-loss.
+  const budgetUsd = document.createElement('input');
+  budgetUsd.type = 'number'; budgetUsd.min = '0'; budgetUsd.step = '0.5'; budgetUsd.placeholder = 'USD (optional)';
+  field('Budget cap — auto-pause at $ (needs provider cost data)', budgetUsd);
+  const budgetTok = document.createElement('input');
+  budgetTok.type = 'number'; budgetTok.min = '0'; budgetTok.placeholder = 'output tokens (optional)';
+  field('Budget cap — auto-pause at output tokens', budgetTok);
+
   const error = document.createElement('div');
   error.className = 'orch-form-error';
   form.appendChild(error);
@@ -746,6 +823,17 @@ async function showNewRunDialog() {
       if (Number.isInteger(capN) && capN > 0) entry.maxConcurrent = capN;
       if (Object.keys(entry).length) tiers[cx] = entry;
     }
+    let review;
+    if (reviewSel.value === 'disabled') review = { enabled: false };
+    else if (reviewSel.value === 'all') review = { lenses: ['spec', 'functionality', 'tests', 'security', 'style'] };
+    else if (reviewSel.value === 'functionality') review = { lenses: ['functionality'] };
+    // 'tiered' → leave review undefined (cost-aware default per complexity)
+
+    const policy = { isolation: isolationSel.value };
+    if (validateInput.value.trim()) policy.validateCmd = validateInput.value.trim();
+    const usd = parseFloat(budgetUsd.value); if (usd > 0) policy.maxBudgetUsd = usd;
+    const tok = parseInt(budgetTok.value, 10); if (tok > 0) policy.maxOutputTokens = tok;
+
     const res = await window.api.orchestration.createRun(projectSel.value, {
       title: titleInput.value.trim(),
       goal: goalInput.value.trim(),
@@ -755,7 +843,8 @@ async function showNewRunDialog() {
         reviewer: { profileId: reviewerSel.value || null },
       },
       tiers: Object.keys(tiers).length ? tiers : undefined,
-      policy: { isolation: isolationSel.value },
+      review,
+      policy,
     });
     if (!res?.ok) {
       submit.disabled = false;

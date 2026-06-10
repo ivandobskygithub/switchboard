@@ -4958,3 +4958,11 @@ body.theme-light .session-item.needs-attention .session-status-dot.running {
 .orch-tier-row .orch-cx { min-width: 64px; text-align: center; }
 .orch-tier-row select { flex: 1; }
 .orch-tier-cap { width: 56px; }
+
+/* Agent Teams — cost + multi-lens review */
+.orch-run-spend { font-size: 11px; opacity: 0.75; font-family: monospace; }
+.orch-card-lenses { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.orch-lens { font-size: 10px; padding: 0 6px; border-radius: 8px; font-weight: 600; }
+.orch-lens-ok { background: rgba(46,160,67,0.22); color: #57ab5a; }
+.orch-lens-bad { background: rgba(248,81,73,0.25); color: #ff7b72; }
+.orch-lens-pending { background: rgba(110,118,129,0.22); color: #adbac7; }

@@ -90,7 +90,7 @@ function main() {
   const projectRoot = process.env.SB_PROJECT_ROOT;
   const cwd = process.cwd();
 
-  const m = prompt.match(/^\/sb-(work|review)\s+(\S+)\s+(\S+)/);
+  const m = prompt.match(/^\/sb-(work|review)\s+(\S+)\s+(\S+)(?:\s+(\S+))?/);
   if (!m || !projectRoot) {
     // Unknown boot prompt (e.g. master /sb-plan in a UI smoke test) — just
     // emit a transcript line and exit cleanly.
@@ -100,7 +100,7 @@ function main() {
     }
     process.exit(0);
   }
-  const [, mode, runId, taskId] = m;
+  const [, mode, runId, taskId, lens] = m;
   const runDir = path.join(projectRoot, '.switchboard', 'runs', runId);
   const taskFile = path.join(runDir, 'tasks', `${taskId}.json`);
   const task = readJson(taskFile);
@@ -128,26 +128,22 @@ function main() {
         [prompt, `Implemented ${taskId}; set needs_review.`]);
     }
   } else {
-    // "Review": write a verdict file and transition the task.
-    const n = (task.reviews || []).length + 1;
+    // "Review" (one lens): write the lens verdict file. Switchboard
+    // aggregates — a lens reviewer does NOT touch the task status.
     const verdict = nextVerdict(projectRoot);
-    const reviewRel = `reviews/${taskId}-${n}.md`;
+    const round = task.reviewRound || 1;
+    const lensName = lens || 'functionality';
+    const reviewRel = `reviews/${taskId}-${lensName}-${round}.md`;
     fs.mkdirSync(path.join(runDir, 'reviews'), { recursive: true });
     fs.writeFileSync(path.join(runDir, reviewRel),
-      `# Review ${n} of ${taskId}\n\nVerdict: **${verdict}**\n\n` +
+      `# ${lensName} review of ${taskId} (round ${round})\n\nVerdict: ${verdict}\n\n` +
       (verdict === 'approved'
         ? 'No blockers found by fake-claude.\n'
         : '- blocker: fake-claude demands a second attempt (test scenario).\n'));
-    const fresh = readJson(taskFile);
-    if (fresh.status === 'reviewing') {
-      fresh.reviews = [...(fresh.reviews || []), { file: reviewRel, verdict }];
-      fresh.status = verdict === 'approved' ? 'approved' : 'changes_requested';
-      writeJson(taskFile, fresh);
-      appendEvent(runDir, { type: 'task-transition', task: taskId, from: 'reviewing', to: fresh.status, actor: 'reviewer' });
-    }
+    appendEvent(runDir, { type: 'note', actor: 'reviewer', task: taskId, text: `${lensName}: ${verdict}` });
     if (process.env.SB_FAKE_HOME) {
       writeTranscript(process.env.SB_FAKE_HOME, cwd, sessionId, runId,
-        [prompt, `Reviewed ${taskId}: ${verdict}.`]);
+        [prompt, `Reviewed ${taskId} (${lensName}): ${verdict}.`]);
     }
   }
   process.exit(0);

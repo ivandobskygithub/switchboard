@@ -87,6 +87,9 @@ test('full lifecycle: implement → review → approve → nudge → merge', { t
       worker: { profileId: 'deepseek', maxConcurrent: 2 },
       reviewer: { profileId: 'anthropic', maxConcurrent: 2 },
     },
+    // Single lens so the fake's per-call verdict sequence maps one-to-one to a
+    // task's review round (multi-lens aggregation is covered in orch-review).
+    review: { lenses: ['functionality'] },
   });
   assert.equal(created.ok, true);
   const run = { ...created.run, status: 'active', masterSessionId: MASTER_ID };
