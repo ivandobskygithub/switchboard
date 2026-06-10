@@ -67,6 +67,7 @@ function makeSandbox() {
       worker: { profileId: 'deepseek', maxConcurrent: 3 },
       reviewer: { profileId: 'anthropic' },
     },
+    tiers: { trivial: { profileId: 'deepseek', maxConcurrent: 4 } },
     // Deterministic fixture: the app's live spawner must not dispatch real
     // `claude` sessions during the UI test (the spawn pipeline is covered by
     // orch-e2e.test.js with fake-claude).
@@ -76,7 +77,7 @@ function makeSandbox() {
   proto.writeRun(project, run);
   fs.writeFileSync(path.join(created.dir, 'plan.md'), '# UI demo plan\n\nLayered delivery.\n');
   proto.writeTask(project, run.id, { id: 'C-01', title: 'Chunk one', status: 'in_progress', kind: 'chunk' });
-  proto.writeTask(project, run.id, { id: 'T-1', title: 'Draft task', status: 'draft', kind: 'leaf', parent: 'C-01' });
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'Draft task', status: 'draft', kind: 'leaf', parent: 'C-01', complexity: 'trivial' });
   proto.writeTask(project, run.id, { id: 'T-2', title: 'Working task', status: 'in_progress', kind: 'leaf', parent: 'C-01', attempts: 1, sessionIds: ['bbbbbbbb-1111-2222-3333-444444444444'] });
   proto.writeTask(project, run.id, { id: 'T-3', title: 'Reviewed task', status: 'needs_review', kind: 'leaf', parent: 'C-01', attempts: 1 });
   proto.writeTask(project, run.id, { id: 'T-4', title: 'Finished task', status: 'done', kind: 'leaf', parent: 'C-01', attempts: 1 });
@@ -212,6 +213,12 @@ test('Electron UI renders the Agent Teams board and applies a human action',
       assert.deepEqual(board.progress, ['T-2']);
       assert.deepEqual(board.review, ['T-3']);
       assert.deepEqual(board.done, ['T-4']);
+
+      // Complexity tier + resolved model is shown on the card.
+      const t1Tier = await cdp.eval(
+        `document.querySelector('.orch-card[data-task-id="T-1"] .orch-card-tier').textContent`);
+      assert.match(t1Tier, /trivial/);
+      assert.match(t1Tier, /deepseek/);
 
       // Header shows title, status and role→profile badges.
       const headerText = await cdp.eval(`document.getElementById('orch-viewer-header').textContent`);

@@ -117,6 +117,16 @@ repo-wide context:
   any unmerged in-flight task is deferred, so accurate hints are what make
   high parallelism safe. A task with an empty filesHint is assumed to
   conflict with nothing — only leave it empty when that is genuinely true.
+- **Tag each leaf task with a \`complexity\`**: one of \`trivial\`, \`low\`,
+  \`medium\` (default), \`high\`, \`critical\`. This is the cost-control knob:
+  the run maps each complexity to a model profile, so trivial mechanical
+  edits run on a cheap/local model while genuinely hard tasks get the
+  strongest one. Judge by reasoning required, not line count: a one-line
+  change to subtle concurrency code is \`high\`; scaffolding a boilerplate
+  file is \`trivial\`. Be honest — over-tagging everything \`high\` defeats the
+  cost savings; under-tagging risks a weak model failing and burning retries.
+- You may pin a specific model for an unusual task with \`profileId\` (worker)
+  or \`reviewerProfileId\` (its review), overriding the complexity tier.
 - **Real seams over mocks.** Prefer designs that need no mocking; when test
   doubles are unavoidable, the spec must say exactly what to fake and how.
 - **Explicit acceptance criteria** that the worker can verify itself (tests

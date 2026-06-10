@@ -38,6 +38,14 @@ const ROLE_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const RUN_STATUSES = new Set(['draft', 'planning', 'active', 'paused', 'done', 'abandoned']);
 const TASK_KINDS = new Set(['epic', 'chunk', 'leaf']);
 
+// Task complexity, cheapest → hardest. The decomposer tags each leaf task;
+// the run's `tiers` map turns a complexity into a model profile (+ optional
+// per-tier concurrency), so cost scales with difficulty: trivial leaves run
+// on a cheap/local model with high parallelism, the rare hard task on Opus.
+const COMPLEXITIES = ['trivial', 'low', 'medium', 'high', 'critical'];
+const DEFAULT_COMPLEXITY = 'medium';
+const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/; // matches profiles.js ID_RE
+
 // Task status machine. Keys are "from" statuses; values are the set of
 // legal "to" statuses. The conventional owner of each transition is noted —
 // not enforceable on a shared filesystem, but Switchboard validates every
@@ -145,6 +153,21 @@ function validateRun(run) {
     if (!ROLE_RE.test(role)) return `invalid role name: ${role}`;
     if (!isPlainObject(cfg)) return `invalid role config: ${role}`;
   }
+  if (run.tiers !== undefined) {
+    if (!isPlainObject(run.tiers)) return 'tiers must be an object';
+    for (const [name, cfg] of Object.entries(run.tiers)) {
+      if (!COMPLEXITIES.includes(name)) return `invalid tier name: ${name}`;
+      if (!isPlainObject(cfg)) return `invalid tier config: ${name}`;
+      for (const k of ['profileId', 'reviewerProfileId']) {
+        if (cfg[k] !== undefined && cfg[k] !== null && (typeof cfg[k] !== 'string' || !PROFILE_ID_RE.test(cfg[k]))) {
+          return `invalid ${k} in tier ${name}`;
+        }
+      }
+      if (cfg.maxConcurrent !== undefined && (!Number.isInteger(cfg.maxConcurrent) || cfg.maxConcurrent < 1)) {
+        return `invalid maxConcurrent in tier ${name}`;
+      }
+    }
+  }
   return null;
 }
 
@@ -165,7 +188,48 @@ function validateTask(task) {
       return 'filesHint must be an array of strings';
     }
   }
+  if (task.complexity !== undefined && !COMPLEXITIES.includes(task.complexity)) {
+    return `invalid complexity: ${task.complexity}`;
+  }
+  for (const k of ['profileId', 'reviewerProfileId']) {
+    if (task[k] !== undefined && task[k] !== null && (typeof task[k] !== 'string' || !PROFILE_ID_RE.test(task[k]))) {
+      return `invalid ${k}`;
+    }
+  }
   return null;
+}
+
+// Resolve which model profile a task should run under, for a given role.
+// Precedence (most specific wins):
+//   1. explicit per-task override (task.profileId / task.reviewerProfileId)
+//   2. the run's tier for the task's complexity
+//   3. the role's default profile
+// Returns a profile id string, or null meaning "use the global default".
+function resolveProfile(run, task, role) {
+  const tierName = (task && COMPLEXITIES.includes(task.complexity)) ? task.complexity : DEFAULT_COMPLEXITY;
+  const tier = run.tiers && run.tiers[tierName];
+  if (role === 'reviewer') {
+    if (task && task.reviewerProfileId) return task.reviewerProfileId;
+    if (tier && tier.reviewerProfileId) return tier.reviewerProfileId;
+    return run.roles.reviewer?.profileId || null;
+  }
+  if (role === 'worker') {
+    if (task && task.profileId) return task.profileId;
+    if (tier && tier.profileId) return tier.profileId;
+    return run.roles.worker?.profileId || null;
+  }
+  return run.roles[role]?.profileId || null;
+}
+
+// Per-tier concurrency cap for a complexity, if the run defines one.
+function tierCap(run, complexity) {
+  const name = COMPLEXITIES.includes(complexity) ? complexity : DEFAULT_COMPLEXITY;
+  const c = run.tiers && run.tiers[name] && run.tiers[name].maxConcurrent;
+  return Number.isInteger(c) && c > 0 ? c : null;
+}
+
+function taskComplexity(task) {
+  return (task && COMPLEXITIES.includes(task.complexity)) ? task.complexity : DEFAULT_COMPLEXITY;
 }
 
 // Canonical form for overlap comparison: case- and separator-insensitive,
@@ -342,7 +406,7 @@ function newRunId(title) {
 
 // Creates the directory skeleton + run.json for a new run. Roles must map
 // role name → { profileId, maxConcurrent? }. Returns { ok, run, dir }.
-function createRun(projectPath, { title, goal, roles, policy, integrationBranch }) {
+function createRun(projectPath, { title, goal, roles, policy, integrationBranch, tiers }) {
   if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'title required' };
   if (!isPlainObject(roles) || !roles.master || !roles.worker || !roles.reviewer) {
     return { ok: false, error: 'roles must define master, worker and reviewer' };
@@ -367,6 +431,21 @@ function createRun(projectPath, { title, goal, roles, policy, integrationBranch 
         ? Math.min(cfg.maxConcurrent, 16)
         : (DEFAULT_ROLE_LIMITS[role] || 1),
     };
+  }
+  // Optional complexity→model tiers. Only keep recognised tier names and
+  // clean fields; an empty/absent map means "every task uses the role default".
+  if (isPlainObject(tiers)) {
+    const cleaned = {};
+    for (const name of COMPLEXITIES) {
+      const t = tiers[name];
+      if (!isPlainObject(t)) continue;
+      const entry = {};
+      if (typeof t.profileId === 'string' && PROFILE_ID_RE.test(t.profileId)) entry.profileId = t.profileId;
+      if (typeof t.reviewerProfileId === 'string' && PROFILE_ID_RE.test(t.reviewerProfileId)) entry.reviewerProfileId = t.reviewerProfileId;
+      if (Number.isInteger(t.maxConcurrent) && t.maxConcurrent > 0) entry.maxConcurrent = Math.min(t.maxConcurrent, 16);
+      if (Object.keys(entry).length) cleaned[name] = entry;
+    }
+    if (Object.keys(cleaned).length) run.tiers = cleaned;
   }
   const err = validateRun(run);
   if (err) return { ok: false, error: err };
@@ -442,6 +521,7 @@ module.exports = {
   orchDir, runsRoot, runDir, worktreesRoot,
   readJsonSafe, writeJsonAtomic,
   validateRun, validateTask, normalizeFileHint, canonicalStatus, STATUS_ALIASES,
+  COMPLEXITIES, DEFAULT_COMPLEXITY, resolveProfile, tierCap, taskComplexity,
   listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,

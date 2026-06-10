@@ -17,6 +17,27 @@ let orchDetail = null;         // last orch:get-run payload for the selection
 let orchDetailTab = 'board';   // board | plan | timeline
 let orchRefreshTimer = null;
 let orchInitDone = false;
+let orchProfiles = [];          // [{id,name}] cached for label lookup
+
+const COMPLEXITY_ORDER = ['trivial', 'low', 'medium', 'high', 'critical'];
+
+function profileLabel(id) {
+  if (!id) return 'default';
+  const p = orchProfiles.find(x => x.id === id);
+  return p ? p.name : id;
+}
+
+// Mirror orch-protocol resolveProfile so the board can show which model a
+// task will actually run on (explicit override → complexity tier → role).
+function resolveTaskProfile(run, task, role) {
+  if (!run) return null;
+  const tierName = COMPLEXITY_ORDER.includes(task?.complexity) ? task.complexity : 'medium';
+  const tier = run.tiers && run.tiers[tierName];
+  if (role === 'reviewer') {
+    return (task && task.reviewerProfileId) || (tier && tier.reviewerProfileId) || run.roles?.reviewer?.profileId || null;
+  }
+  return (task && task.profileId) || (tier && tier.profileId) || run.roles?.worker?.profileId || null;
+}
 
 const ORCH_BOARD_COLUMNS = [
   { key: 'backlog',  label: 'Backlog',     statuses: ['draft'] },
@@ -58,6 +79,7 @@ function initOrchestration() {
 
 async function loadTeams() {
   initOrchestration();
+  try { orchProfiles = (await window.api.profiles.list())?.profiles || []; } catch {}
   const projectPaths = (typeof cachedProjects !== 'undefined' ? cachedProjects : [])
     .map(p => p.projectPath).filter(Boolean);
   try {
@@ -238,13 +260,27 @@ function renderOrchHeader() {
   chip.textContent = run.status;
   titleWrap.appendChild(chip);
 
-  // role → profile badges, e.g. "master: anthropic · worker ×4: deepseek"
+  // role → profile badges, e.g. "master: opus · worker ×6: deepseek"
   const roles = document.createElement('span');
   roles.className = 'orch-header-roles';
   roles.textContent = Object.entries(run.roles || {})
-    .map(([role, cfg]) => `${role}${cfg.maxConcurrent > 1 ? ` ×${cfg.maxConcurrent}` : ''}: ${cfg.profileId || 'default'}`)
+    .map(([role, cfg]) => `${role}${cfg.maxConcurrent > 1 ? ` ×${cfg.maxConcurrent}` : ''}: ${profileLabel(cfg.profileId)}`)
     .join(' · ');
   titleWrap.appendChild(roles);
+
+  // tier roster, when configured: "tiers — trivial: qwen ×8 · high: opus ×1"
+  if (run.tiers && Object.keys(run.tiers).length) {
+    const tiers = document.createElement('span');
+    tiers.className = 'orch-header-tiers';
+    tiers.textContent = 'tiers — ' + COMPLEXITY_ORDER
+      .filter(cx => run.tiers[cx])
+      .map(cx => {
+        const t = run.tiers[cx];
+        return `${cx}: ${profileLabel(t.profileId)}${t.maxConcurrent ? ` ×${t.maxConcurrent}` : ''}`;
+      })
+      .join(' · ');
+    titleWrap.appendChild(tiers);
+  }
   header.appendChild(titleWrap);
 
   // Malformed task files (bad agent writes) must be loudly visible — they
@@ -361,6 +397,21 @@ function buildOrchCard(task) {
   title.className = 'orch-card-title';
   title.textContent = task.title;
   card.appendChild(title);
+
+  // Complexity + the model it resolves to — so cost routing is visible at a
+  // glance ("trivial → qwen-local", "critical → opus").
+  const tier = document.createElement('div');
+  tier.className = 'orch-card-tier';
+  const complexity = COMPLEXITY_ORDER.includes(task.complexity) ? task.complexity : 'medium';
+  const cx = document.createElement('span');
+  cx.className = `orch-cx orch-cx-${complexity}`;
+  cx.textContent = complexity;
+  tier.appendChild(cx);
+  const model = document.createElement('span');
+  model.className = 'orch-card-model';
+  model.textContent = '→ ' + profileLabel(resolveTaskProfile(orchDetail.run, task, 'worker'));
+  tier.appendChild(model);
+  card.appendChild(tier);
 
   const meta = document.createElement('div');
   meta.className = 'orch-card-meta';
@@ -619,14 +670,50 @@ async function showNewRunDialog() {
     }
     return sel;
   };
-  const masterSel = field('Master profile (planner/orchestrator — strongest model)', profileSelect());
-  const workerSel = field('Worker profile (implementers — fast/cheap model)', profileSelect());
-  const reviewerSel = field('Reviewer profile (adversarial review)', profileSelect());
+  const masterSel = field('Master profile (planner/orchestrator — strongest model)', profileSelect('opus'));
+  const workerSel = field('Default worker profile (fallback when no tier matches)', profileSelect('deepseek'));
+  const reviewerSel = field('Default reviewer profile (adversarial review)', profileSelect('opus'));
 
   const workerCount = document.createElement('input');
   workerCount.type = 'number';
-  workerCount.min = '1'; workerCount.max = '16'; workerCount.value = '4';
-  field('Max parallel workers', workerCount);
+  workerCount.min = '1'; workerCount.max = '16'; workerCount.value = '6';
+  field('Max parallel workers (global ceiling across all tiers)', workerCount);
+
+  // --- Per-complexity model tiers (cost optimisation) ---
+  // Each leaf task is tagged trivial→critical by the planner; here you bind
+  // each tier to a model profile and an optional parallelism cap, so cheap
+  // tasks run wide on a local/cheap model and hard ones on the strong one.
+  const tierWrap = document.createElement('details');
+  tierWrap.className = 'orch-tier-editor';
+  const tierSummary = document.createElement('summary');
+  tierSummary.textContent = 'Model tiers by task complexity (optional — cost control)';
+  tierWrap.appendChild(tierSummary);
+  const tierHint = document.createElement('div');
+  tierHint.className = 'orch-tier-hint';
+  tierHint.textContent = 'Leave a tier on "Default worker profile" to fall back. Per-tier max caps run within the global ceiling above.';
+  tierWrap.appendChild(tierHint);
+
+  const tierRows = {};
+  const TIER_HINTS = { trivial: 'qwen', low: 'deepseek', medium: 'deepseek', high: 'opus', critical: 'opus' };
+  for (const cx of COMPLEXITY_ORDER) {
+    const row = document.createElement('div');
+    row.className = 'orch-tier-row';
+    const lab = document.createElement('span');
+    lab.className = `orch-cx orch-cx-${cx}`;
+    lab.textContent = cx;
+    row.appendChild(lab);
+    const sel = profileSelect();
+    sel.title = `Model for ${cx} tasks`;
+    row.appendChild(sel);
+    const cap = document.createElement('input');
+    cap.type = 'number'; cap.min = '1'; cap.max = '16'; cap.placeholder = 'max';
+    cap.className = 'orch-tier-cap';
+    cap.title = `Max parallel ${cx} tasks`;
+    row.appendChild(cap);
+    tierRows[cx] = { sel, cap };
+    tierWrap.appendChild(row);
+  }
+  form.appendChild(tierWrap);
 
   const isolationSel = document.createElement('select');
   for (const [v, label] of [['worktree', 'Git worktree per task (recommended)'], ['none', 'Shared working dir (no isolation)']]) {
@@ -650,14 +737,24 @@ async function showNewRunDialog() {
     if (!goalInput.value.trim()) { error.textContent = 'Goal is required.'; return; }
     submit.disabled = true;
     submit.textContent = 'Creating…';
+    const tiers = {};
+    for (const cx of COMPLEXITY_ORDER) {
+      const { sel, cap } = tierRows[cx];
+      const entry = {};
+      if (sel.value) entry.profileId = sel.value;
+      const capN = parseInt(cap.value, 10);
+      if (Number.isInteger(capN) && capN > 0) entry.maxConcurrent = capN;
+      if (Object.keys(entry).length) tiers[cx] = entry;
+    }
     const res = await window.api.orchestration.createRun(projectSel.value, {
       title: titleInput.value.trim(),
       goal: goalInput.value.trim(),
       roles: {
         master: { profileId: masterSel.value || null },
-        worker: { profileId: workerSel.value || null, maxConcurrent: parseInt(workerCount.value, 10) || 4 },
+        worker: { profileId: workerSel.value || null, maxConcurrent: parseInt(workerCount.value, 10) || 6 },
         reviewer: { profileId: reviewerSel.value || null },
       },
+      tiers: Object.keys(tiers).length ? tiers : undefined,
       policy: { isolation: isolationSel.value },
     });
     if (!res?.ok) {

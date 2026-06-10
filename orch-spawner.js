@@ -140,6 +140,24 @@ class OrchSpawner {
     const workerCap = run.roles.worker?.maxConcurrent ?? 4;
     const reviewerCap = run.roles.reviewer?.maxConcurrent ?? 2;
 
+    // Per-complexity-tier worker counts, so each tier can ramp independently
+    // (e.g. 8 cheap "trivial" tasks in parallel but only 1 "critical" on Opus).
+    const tierActive = {};
+    for (const t of tasks) {
+      if (proto.ACTIVE_WORKER_STATUSES.has(t.status)) {
+        const c = proto.taskComplexity(t);
+        tierActive[c] = (tierActive[c] || 0) + 1;
+      }
+    }
+    const tierSaturated = (t) => {
+      const cap = proto.tierCap(run, proto.taskComplexity(t));
+      return cap != null && (tierActive[proto.taskComplexity(t)] || 0) >= cap;
+    };
+    const countTier = (t) => {
+      const c = proto.taskComplexity(t);
+      tierActive[c] = (tierActive[c] || 0) + 1;
+    };
+
     // Concurrency is bounded by the role cap AND by file overlap: two tasks
     // whose filesHint intersect must never run at the same time, however
     // high the cap is. Every not-yet-merged task that has started work
@@ -158,7 +176,8 @@ class OrchSpawner {
       // are already counted as occupied by themselves).
       for (const t of tasks.filter(x => x.status === 'changes_requested' && leaf(x))) {
         if (activeWorkers >= workerCap) break;
-        if (await this._dispatchRework(projectPath, run, policy, t)) { activeWorkers++; acted = true; }
+        if (tierSaturated(t)) continue;
+        if (await this._dispatchRework(projectPath, run, policy, t)) { activeWorkers++; countTier(t); acted = true; }
       }
       const inCycle = proto.tasksInDependencyCycle(tasks);
       const ready = tasks
@@ -180,9 +199,14 @@ class OrchSpawner {
           }
           continue;
         }
+        if (tierSaturated(t)) {
+          this.log.debug(`[orch] ${run.id}/${t.id} deferred: ${proto.taskComplexity(t)} tier at capacity`);
+          continue;
+        }
         if (activeWorkers >= workerCap) break;
         if (await this._dispatchWorker(projectPath, run, policy, t)) {
           activeWorkers++;
+          countTier(t);
           acted = true;
           occupy(t);
         }
@@ -410,8 +434,12 @@ class OrchSpawner {
   // decisions (permission mode, protocol access, MCP) can't drift apart.
   _sessionOptions(projectPath, run, task, role, cwd, initialPrompt) {
     const roleCfg = this._roleCfg(run, role);
+    // Model profile is resolved per task: explicit task override → the run's
+    // tier for this task's complexity → the role default. This is the knob
+    // that routes leaf tasks to cheap/local models and hard ones to Opus.
+    const profileId = proto.resolveProfile(run, task, role);
     return {
-      profileId: roleCfg.profileId || undefined,
+      profileId: profileId || undefined,
       permissionMode: roleCfg.permissionMode || 'acceptEdits',
       initialPrompt,
       appendSystemPrompt: this.deps.rolePrompt(role, run, projectPath, task) || undefined,
