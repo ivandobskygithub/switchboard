@@ -388,8 +388,8 @@ test('nudge waits out a busy master and delivers once it goes idle', async () =>
 
 test('agent-written text in nudges cannot inject control characters into the master PTY', async () => {
   const project = tmpProject();
-  const run = makeActiveRun(project);
-  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'ready', kind: 'leaf', attempts: 0 });
+  const run = makeActiveRun(project, { autoSpawnWorkers: false });
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'blocked', kind: 'leaf', attempts: 0 });
   const { calls, deps } = makeHarness();
   const watcher = new OrchWatcher();
   const spawner = new OrchSpawner({ watcher, deps, nudgeDebounceMs: 20 });
@@ -398,6 +398,7 @@ test('agent-written text in nudges cannot inject control characters into the mas
     watcher.watchProject(project);
     await new Promise(r => setTimeout(r, 30));
     // A hostile blockedReason trying to submit an extra command to the master.
+    proto.transitionTask(project, run.id, 'T-1', 'blocked', 'ready', {});
     proto.transitionTask(project, run.id, 'T-1', 'ready', 'blocked',
       { blockedReason: 'oops\r/dangerous-command --yes\rmore' });
     watcher.refresh(project);
