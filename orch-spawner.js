@@ -34,11 +34,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const proto = require('./orch-protocol');
+const { stripSubmitChars } = require('./submit-chars');
 
 const RECONCILE_TICK_MS = 15_000;
 const NUDGE_DEBOUNCE_MS = 2_000;
 const NUDGE_RETRY_MS = 10_000;
 const NUDGE_MAX_QUEUE = 40;
+const NUDGE_MAX_RETRIES = 30; // ~5 min of an unreachable master before we drop the queue
 // How long a task may sit in an "active" status with no live session before
 // the sweep recovers it. Generous: a session needs time to appear between
 // the status write and the PTY registering.
@@ -57,6 +59,8 @@ class OrchSpawner {
     this._nudgeQueues = new Map();   // `${projectPath} ${runId}` → { lines, timer, ... }
     this._staleSince = new Map();    // `${projectPath}|${runId}|${taskId}|${status}` → first-seen ms
     this._protocolWarned = new Set(); // dedupe keys for protocol-warning events
+    this._cleanedWorktrees = new Set(); // `${projectPath}|${runId}|${taskId}` worktrees removed
+    this._cleanedRuns = new Set();   // `${projectPath}|${runId}` finished runs cleaned
     this._tick = null;
     this._stopped = false;
 
@@ -115,14 +119,21 @@ class OrchSpawner {
   }
 
   async _reconcileRun(projectPath, { run, tasks }) {
+    if (['done', 'abandoned'].includes(run.status)) {
+      await this._cleanupFinishedRun(projectPath, run);
+      return false;
+    }
     if (run.status !== 'active') return false;
     const policy = { ...proto.DEFAULT_POLICY, ...(run.policy || {}) };
     const byId = new Map(tasks.map(t => [t.id, t]));
     const leaf = (t) => (t.kind || 'leaf') === 'leaf';
     let acted = false;
 
+    this._persistStatusAliases(projectPath, run, tasks);
     acted = this._sweepStaleTasks(projectPath, run, tasks) || acted;
     acted = this._auditProtocol(projectPath, run, tasks) || acted;
+    acted = this._blockCycles(projectPath, run, tasks) || acted;
+    if (policy.isolation !== 'none') await this._cleanupDoneWorktrees(projectPath, run, tasks);
 
     let activeWorkers = tasks.filter(t => proto.ACTIVE_WORKER_STATUSES.has(t.status)).length;
     let activeReviewers = tasks.filter(t => proto.ACTIVE_REVIEWER_STATUSES.has(t.status)).length;
@@ -149,10 +160,12 @@ class OrchSpawner {
         if (activeWorkers >= workerCap) break;
         if (await this._dispatchRework(projectPath, run, policy, t)) { activeWorkers++; acted = true; }
       }
+      const inCycle = proto.tasksInDependencyCycle(tasks);
       const ready = tasks
         .filter(x => x.status === 'ready' && leaf(x))
         .sort((a, b) => a.id.localeCompare(b.id));
       for (const t of ready) {
+        if (inCycle.has(t.id)) continue; // handled by _blockCycles
         if (!proto.depsSatisfied(t, byId)) continue;
         if (overlapsOccupied(t)) {
           this.log.debug(`[orch] ${run.id}/${t.id} deferred: files overlap an active task`);
@@ -238,6 +251,81 @@ class OrchSpawner {
     return acted;
   }
 
+  // A small model may write a status alias (e.g. `needs_revision`). The
+  // snapshot already shows it canonicalized; rewrite the file once so the
+  // agent's own next read sees the canonical value too.
+  _persistStatusAliases(projectPath, run, tasks) {
+    for (const task of tasks) {
+      if (!task._statusWas) continue;
+      const fresh = proto.readJsonSafe(
+        path.join(proto.runDir(projectPath, run.id), 'tasks', `${task.id}.json`));
+      if (!fresh || fresh.status !== task._statusWas) continue; // moved on / already fixed
+      const { _statusWas, ...clean } = task;
+      proto.writeTask(projectPath, run.id, clean);
+      proto.appendEvent(projectPath, run.id, {
+        type: 'status-normalized', task: task.id, from: _statusWas, to: task.status,
+      });
+      this.log.info(`[orch] normalized status alias for ${run.id}/${task.id}: ${_statusWas} → ${task.status}`);
+    }
+  }
+
+  // dependsOn cycles would wedge every task in the cycle at `ready` forever.
+  // Block them with a clear reason so the master (or the user) can fix the
+  // graph, instead of an invisible deadlock.
+  _blockCycles(projectPath, run, tasks) {
+    let acted = false;
+    const inCycle = proto.tasksInDependencyCycle(tasks);
+    for (const t of tasks) {
+      if (t.status !== 'ready' || !inCycle.has(t.id)) continue;
+      const r = proto.transitionTask(projectPath, run.id, t.id, 'ready', 'blocked',
+        { blockedReason: 'dependsOn cycle — this task can never become unblocked' });
+      if (r.ok) {
+        acted = true;
+        proto.appendEvent(projectPath, run.id, { type: 'dependency-cycle', task: t.id });
+        this.log.warn(`[orch] ${run.id}/${t.id} blocked: dependsOn cycle`);
+      }
+    }
+    return acted;
+  }
+
+  // Worktrees accumulate otherwise: the master's /sb-merge prompt removes a
+  // task worktree on done, but we enforce it mechanically too (idempotent,
+  // tracked so we don't shell out repeatedly). `done` means merged, so the
+  // working tree is disposable; the branch is kept.
+  async _cleanupDoneWorktrees(projectPath, run, tasks) {
+    if (!this.deps.removeTaskWorktree) return;
+    for (const t of tasks) {
+      if (t.status !== 'done' || !t.worktree) continue;
+      const key = `${projectPath}|${run.id}|${t.id}`;
+      if (this._cleanedWorktrees.has(key)) continue;
+      this._cleanedWorktrees.add(key);
+      try {
+        const r = await this.deps.removeTaskWorktree(projectPath, run.id, t.id);
+        if (r && r.ok && r.removed) {
+          proto.appendEvent(projectPath, run.id, { type: 'worktree-cleaned', task: t.id });
+        } else if (r && !r.ok) {
+          this._cleanedWorktrees.delete(key); // let a later pass retry
+        }
+      } catch { this._cleanedWorktrees.delete(key); }
+    }
+  }
+
+  // When a run finishes, remove all its worktrees once (integration + any
+  // leftover task worktrees) and prune.
+  async _cleanupFinishedRun(projectPath, run) {
+    if (!this.deps.removeRunWorktrees) return;
+    const key = `${projectPath}|${run.id}`;
+    if (this._cleanedRuns.has(key)) return;
+    this._cleanedRuns.add(key);
+    try {
+      const r = await this.deps.removeRunWorktrees(projectPath, run.id);
+      if (r && r.ok && r.removed?.length) {
+        proto.appendEvent(projectPath, run.id, { type: 'run-worktrees-cleaned', count: r.removed.length });
+        this.log.info(`[orch] cleaned ${r.removed.length} worktree(s) for finished run ${run.id}`);
+      }
+    } catch { this._cleanedRuns.delete(key); }
+  }
+
   // --- protocol audit & normalization ---------------------------------------
   //
   // Agents of varying quality write these files; the conventions the
@@ -251,6 +339,14 @@ class OrchSpawner {
 
   _auditProtocol(projectPath, run, tasks) {
     let acted = false;
+    // Keep _protocolWarned from growing without bound across a long run: a
+    // warning key is only meaningful while its task is still in that status.
+    const liveWarnKeys = new Set(
+      tasks.filter(t => ['approved', 'changes_requested'].includes(t.status))
+        .map(t => `${projectPath}|${run.id}|${t.id}|${t.status}|no-review`));
+    for (const k of this._protocolWarned) {
+      if (k.startsWith(`${projectPath}|${run.id}|`) && !liveWarnKeys.has(k)) this._protocolWarned.delete(k);
+    }
     for (const task of tasks) {
       if (!['approved', 'changes_requested'].includes(task.status)) continue;
       if ((task.reviews || []).length > 0) continue;
@@ -507,8 +603,9 @@ class OrchSpawner {
     // Nudge lines embed agent-written text (blockedReason, failReason) and
     // are typed into the master's PTY — control characters here would let a
     // rogue/buggy task file inject extra submitted prompts into the master
-    // session. Strip them and cap the length.
-    line = String(line).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
+    // session. Strip C0/C7F/DEL AND the Unicode line/paragraph separators
+    // (U+2028/U+2029) and NEL (U+0085) that some terminals treat as Enter.
+    line = stripSubmitChars(String(line)).slice(0, 300);
     const key = projectPath + ' ' + runId;
     let q = this._nudgeQueues.get(key);
     if (!q) {
@@ -533,11 +630,21 @@ class OrchSpawner {
     const master = run.masterSessionId;
     const deliverable = master && this.deps.isSessionActive(master) && !this.deps.isSessionBusy(master);
     if (!deliverable) {
-      // Master closed or thinking — retry later; the event log still has everything.
+      // Master closed or thinking — retry, but bound it: a master that never
+      // comes back (closed terminal) must not leave a timer rescheduling
+      // itself forever. After a cap we drop the queue; the event log and the
+      // master's own /sb-orchestrate re-scan still carry the information.
+      q.retries = (q.retries || 0) + 1;
+      if (q.retries > NUDGE_MAX_RETRIES) {
+        this.log.warn(`[orch] giving up nudging ${q.runId} after ${q.retries} retries (master unreachable)`);
+        this._nudgeQueues.delete(key);
+        return;
+      }
       q.timer = setTimeout(() => { q.timer = null; this._flushNudge(key); }, this.nudgeRetryMs);
       if (q.timer.unref) q.timer.unref();
       return;
     }
+    q.retries = 0;
     const text = `[switchboard] ${q.lines.join('; ')} — run /sb-orchestrate to continue.`;
     this.deps.sendInput(master, text + '\r');
     proto.appendEvent(q.projectPath, q.runId, { type: 'master-nudged', lines: q.lines });

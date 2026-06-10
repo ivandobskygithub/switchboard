@@ -35,7 +35,14 @@ function git(projectPath, args, opts = {}) {
 }
 
 function isValidBranch(name) {
-  return typeof name === 'string' && BRANCH_RE.test(name) && !name.includes('..') && !name.endsWith('/');
+  // BRANCH_RE already forces an alphanumeric first char (so a name can never
+  // start with '-' and be parsed by git as an option). Also reject '--'
+  // anywhere and a trailing '/' as defence-in-depth against option smuggling
+  // (e.g. "x--upload-pack=...") even though git reads the whole token as one
+  // branch name; every git call here uses execFile (no shell) and passes the
+  // branch as a single argument.
+  return typeof name === 'string' && BRANCH_RE.test(name)
+    && !name.includes('..') && !name.includes('--') && !name.endsWith('/');
 }
 
 function taskWorktreePath(projectPath, runId, taskId) {
@@ -135,6 +142,26 @@ async function removeTaskWorktree(projectPath, runId, taskId, { force = false } 
   return { ok: true, removed: true };
 }
 
+// Remove every worktree belonging to a run (task worktrees and the
+// integration worktree) and prune stale registrations. Used when a run
+// finishes/abandons so worktrees don't accumulate across runs. Branches are
+// kept — only the working directories are removed.
+async function removeRunWorktrees(projectPath, runId) {
+  if (!RUN_ID_RE.test(runId || '')) return { ok: false, error: 'invalid runId' };
+  const prefix = path.join(worktreesRoot(projectPath), `${runId}--`);
+  const removed = [];
+  for (const w of await listWorktrees(projectPath)) {
+    if (!w.path) continue;
+    const wp = path.resolve(w.path);
+    if (wp.toLowerCase().startsWith(path.resolve(prefix).toLowerCase())) {
+      const r = await git(projectPath, ['worktree', 'remove', '--force', wp]);
+      if (r.ok) removed.push(wp);
+    }
+  }
+  await git(projectPath, ['worktree', 'prune']);
+  return { ok: true, removed };
+}
+
 async function listWorktrees(projectPath) {
   const r = await git(projectPath, ['worktree', 'list', '--porcelain']);
   if (!r.ok) return [];
@@ -163,6 +190,7 @@ module.exports = {
   ensureIntegrationWorktree,
   ensureTaskWorktree,
   removeTaskWorktree,
+  removeRunWorktrees,
   listWorktrees,
   taskWorktreePath,
   taskBranchName,

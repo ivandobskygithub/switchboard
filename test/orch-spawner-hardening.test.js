@@ -280,6 +280,122 @@ test('file-overlap guard: overlapping ready tasks serialize, disjoint ones paral
   }
 });
 
+test('a worker status alias (needs_revision) is canonicalized and the task keeps moving', async () => {
+  const project = tmpProject();
+  const run = makeActiveRun(project);
+  // Write a task file directly with a small-model status typo.
+  fs.writeFileSync(
+    path.join(proto.runDir(project, run.id), 'tasks', 'T-1.json'),
+    JSON.stringify({ id: 'T-1', title: 'a', kind: 'leaf', status: 'needs_revision', sessionIds: ['w1'] }));
+
+  const { calls, deps } = makeHarness();
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);
+    // Canonicalized off the alias, then advanced by the reviewer dispatch
+    // (needs_revision → needs_review → reviewing). Never the alias, never
+    // invalid, and the scratch field is not persisted.
+    const task = proto.readTask(project, run.id, 'T-1');
+    assert.equal(task.status, 'reviewing');
+    const raw = JSON.parse(fs.readFileSync(path.join(proto.runDir(project, run.id), 'tasks', 'T-1.json'), 'utf8'));
+    assert.ok(['needs_review', 'reviewing'].includes(raw.status), `canonical, not alias (${raw.status})`);
+    assert.equal(raw._statusWas, undefined, 'scratch field not persisted');
+    assert.ok(calls.openTerminal.some(c => c.opts.initialPrompt.startsWith('/sb-review')));
+    assert.ok(proto.readEvents(project, run.id).some(e => e.type === 'status-normalized'));
+  } finally {
+    spawner.stop();
+    watcher.dispose();
+  }
+});
+
+test('dependsOn cycles are blocked with a clear reason instead of deadlocking', async () => {
+  const project = tmpProject();
+  const run = makeActiveRun(project);
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'ready', kind: 'leaf', dependsOn: ['T-2'] });
+  proto.writeTask(project, run.id, { id: 'T-2', title: 'b', status: 'ready', kind: 'leaf', dependsOn: ['T-1'] });
+  proto.writeTask(project, run.id, { id: 'T-3', title: 'c', status: 'ready', kind: 'leaf' });
+  const { calls, deps } = makeHarness();
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);
+    assert.equal(proto.readTask(project, run.id, 'T-1').status, 'blocked');
+    assert.equal(proto.readTask(project, run.id, 'T-2').status, 'blocked');
+    assert.match(proto.readTask(project, run.id, 'T-1').blockedReason, /cycle/);
+    assert.equal(proto.readTask(project, run.id, 'T-3').status, 'in_progress', 'acyclic task still runs');
+    assert.ok(proto.readEvents(project, run.id).some(e => e.type === 'dependency-cycle'));
+  } finally {
+    spawner.stop();
+    watcher.dispose();
+  }
+});
+
+test('done task worktrees are cleaned up; finished runs clean all worktrees', async () => {
+  const project = tmpProject();
+  const run = makeActiveRun(project, { isolation: 'worktree' });
+  const removedTasks = [];
+  const removedRuns = [];
+  const { deps } = makeHarness({
+    removeTaskWorktree: async (_p, _r, taskId) => { removedTasks.push(taskId); return { ok: true, removed: true }; },
+    removeRunWorktrees: async (_p, runId) => { removedRuns.push(runId); return { ok: true, removed: ['x', 'y'] }; },
+  });
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'done', kind: 'leaf', worktree: '/tmp/wt/T-1' });
+  proto.writeTask(project, run.id, { id: 'T-2', title: 'b', status: 'in_progress', kind: 'leaf', worktree: '/tmp/wt/T-2', sessionIds: ['live'] });
+
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);
+    assert.deepEqual(removedTasks, ['T-1'], 'only the done task worktree is removed');
+    // second pass must not remove it again (tracked)
+    await spawner.reconcile(project);
+    assert.deepEqual(removedTasks, ['T-1']);
+    assert.ok(proto.readEvents(project, run.id).some(e => e.type === 'worktree-cleaned'));
+
+    // Finish the run → all its worktrees are cleaned once.
+    proto.writeRun(project, { ...proto.readRun(project, run.id), status: 'done' });
+    watcher.refresh(project);
+    await spawner.reconcile(project);
+    await spawner.reconcile(project);
+    assert.deepEqual(removedRuns, [run.id], 'run worktrees cleaned exactly once');
+  } finally {
+    spawner.stop();
+    watcher.dispose();
+  }
+});
+
+test('crash recovery: a spawning task with pendingSessionId but no live session is recovered', async () => {
+  const project = tmpProject();
+  const run = makeActiveRun(project, { autoSpawnWorkers: false });
+  // Simulates Switchboard killed right after writing `spawning` (process died
+  // before openTerminal returned, so the id is only in pendingSessionId).
+  proto.writeTask(project, run.id, {
+    id: 'T-1', title: 'a', status: 'spawning', kind: 'leaf',
+    pendingSessionId: 'died-before-open', attempts: 1,
+  });
+  const { deps } = makeHarness();
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps, staleGraceMs: 20 });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);              // first sighting
+    await new Promise(r => setTimeout(r, 40));
+    watcher.refresh(project);
+    await spawner.reconcile(project);              // grace elapsed
+    const task = proto.readTask(project, run.id, 'T-1');
+    assert.equal(task.status, 'ready', 'recovered to ready for re-dispatch');
+    assert.equal(task.pendingSessionId, null);
+    assert.ok(proto.readEvents(project, run.id).some(e => e.type === 'stale-spawn-recovered'));
+  } finally {
+    spawner.stop();
+    watcher.dispose();
+  }
+});
+
 test('a verdict without a recorded review raises protocol-warning once and nudges the master', async () => {
   const project = tmpProject();
   const run = makeActiveRun(project, { autoSpawnWorkers: false, autoSpawnReviewers: false });

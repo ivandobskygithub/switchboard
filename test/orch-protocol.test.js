@@ -127,6 +127,21 @@ test('depsSatisfied and summarizeTasks', () => {
   assert.equal(s.byStatus.ready, 2);
 });
 
+test('tasksInDependencyCycle finds self-loops, multi-node cycles, and dependents', () => {
+  const tasks = [
+    { id: 'A', dependsOn: ['B'] },
+    { id: 'B', dependsOn: ['A'] },     // A<->B cycle
+    { id: 'C', dependsOn: ['B'] },     // depends on a cycle member
+    { id: 'D', dependsOn: ['D'] },     // self-loop
+    { id: 'E', dependsOn: ['F'] },     // clean chain
+    { id: 'F', dependsOn: [] },
+    { id: 'G' },                       // no deps at all
+  ];
+  const bad = proto.tasksInDependencyCycle(tasks);
+  assert.ok(bad.has('A') && bad.has('B') && bad.has('C') && bad.has('D'));
+  assert.ok(!bad.has('E') && !bad.has('F') && !bad.has('G'));
+});
+
 test('readRun/readTask reject hostile ids', () => {
   const project = tmpProject();
   assert.equal(proto.readRun(project, '../../etc'), null);

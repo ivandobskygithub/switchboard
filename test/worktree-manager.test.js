@@ -121,4 +121,22 @@ test('rejects hostile ids and branch names', async () => {
   assert.equal(wt.isValidBranch('teams/ok-1.x'), true);
   assert.equal(wt.isValidBranch('a..b'), false);
   assert.equal(wt.isValidBranch('-flag'), false);
+  // option-smuggling defence: reject '--' anywhere (e.g. x--upload-pack=...)
+  assert.equal(wt.isValidBranch('master--upload-pack=evil'), false);
+  assert.equal(wt.isValidBranch('teams/a--b'), false);
+});
+
+test('removeRunWorktrees removes a run\'s worktrees and keeps unrelated ones', async () => {
+  const repo = makeRepo();
+  const a = await wt.ensureTaskWorktree(repo, RUN_ID, 'T-1', 'teams/demo');
+  await wt.ensureIntegrationWorktree(repo, RUN_ID, 'teams/demo');
+  const otherRun = '2026-06-10-other-9999';
+  const b = await wt.ensureTaskWorktree(repo, otherRun, 'T-1', 'teams/other');
+  assert.equal(a.ok && b.ok, true);
+
+  const res = await wt.removeRunWorktrees(repo, RUN_ID);
+  assert.equal(res.ok, true);
+  assert.ok(res.removed.length >= 2, 'task + integration worktrees removed');
+  assert.equal(fs.existsSync(a.path), false);
+  assert.equal(fs.existsSync(b.path), true, 'other run untouched');
 });

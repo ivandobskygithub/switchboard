@@ -58,6 +58,30 @@ const TASK_TRANSITIONS = {
 };
 const TASK_STATUSES = new Set(Object.keys(TASK_TRANSITIONS));
 
+// Small models reliably emit lexical variants of the canonical statuses
+// (observed live: haiku wrote `needs_revision` for `needs_review`). Mapping
+// these obvious same-state variants keeps a run moving instead of dropping
+// the task as invalid. Only same-state aliases are listed — never a mapping
+// that would change which state the agent intended (e.g. `reviewed`→approved
+// is deliberately NOT here; that's a decision, not a typo).
+const STATUS_ALIASES = {
+  'needs_revision': 'needs_review',
+  'needs-review': 'needs_review',
+  'needs-revision': 'needs_review',
+  'needsreview': 'needs_review',
+  'in-progress': 'in_progress',
+  'inprogress': 'in_progress',
+  'changes-requested': 'changes_requested',
+  'changes_required': 'changes_requested',
+  'changes-required': 'changes_requested',
+  'change_requested': 'changes_requested',
+};
+function canonicalStatus(s) {
+  if (typeof s !== 'string') return s;
+  if (TASK_STATUSES.has(s)) return s;
+  return STATUS_ALIASES[s.toLowerCase()] || s;
+}
+
 // Statuses that count against a role's maxConcurrent budget.
 const ACTIVE_WORKER_STATUSES = new Set(['spawning', 'in_progress']);
 const ACTIVE_REVIEWER_STATUSES = new Set(['reviewing']);
@@ -182,6 +206,12 @@ function readTasksDetailed(projectPath, runId) {
       invalid.push({ file: `tasks/${name}`, error: 'unparseable JSON' });
       continue;
     }
+    // Coerce a same-state status alias to canonical before validating, and
+    // flag it so the spawner can rewrite the file once.
+    if (task && typeof task.status === 'string' && !TASK_STATUSES.has(task.status)) {
+      const canon = canonicalStatus(task.status);
+      if (canon !== task.status) { task._statusWas = task.status; task.status = canon; }
+    }
     const err = validateTask(task);
     if (err) {
       invalid.push({ file: `tasks/${name}`, error: err });
@@ -204,6 +234,7 @@ function readTasks(projectPath, runId) {
 function readTask(projectPath, runId, taskId) {
   if (!TASK_ID_RE.test(taskId || '')) return null;
   const task = readJsonSafe(path.join(tasksDir(runDir(projectPath, runId)), taskId + '.json'));
+  if (task && typeof task.status === 'string') task.status = canonicalStatus(task.status);
   if (!task || validateTask(task)) return null;
   return task;
 }
@@ -357,6 +388,36 @@ function depsSatisfied(task, tasksById) {
   return true;
 }
 
+// Detect dependsOn cycles across a task set. A cycle would otherwise wedge
+// every task in it at `ready` forever (depsSatisfied never becomes true),
+// with no error — the spawner uses this to block them with a clear reason.
+// Returns a Set of task ids that are part of, or transitively depend on, a
+// cycle.
+function tasksInDependencyCycle(tasks) {
+  const byId = new Map(tasks.map(t => [t.id, t]));
+  const state = new Map(); // id → 0 unvisited, 1 in-stack, 2 done
+  const bad = new Set();
+  function visit(id, stack) {
+    const t = byId.get(id);
+    if (!t) return false;
+    const s = state.get(id) || 0;
+    if (s === 1) { for (const x of stack) bad.add(x); bad.add(id); return true; }
+    if (s === 2) return bad.has(id);
+    state.set(id, 1);
+    stack.push(id);
+    let onCycle = false;
+    for (const dep of t.dependsOn || []) {
+      if (visit(dep, stack)) onCycle = true;
+    }
+    stack.pop();
+    state.set(id, 2);
+    if (onCycle) bad.add(id);
+    return onCycle;
+  }
+  for (const t of tasks) visit(t.id, []);
+  return bad;
+}
+
 // Roll-up used by the GUI and by spawn decisions.
 function summarizeTasks(tasks) {
   const byStatus = {};
@@ -380,10 +441,10 @@ module.exports = {
   DEFAULT_POLICY,
   orchDir, runsRoot, runDir, worktreesRoot,
   readJsonSafe, writeJsonAtomic,
-  validateRun, validateTask, normalizeFileHint,
+  validateRun, validateTask, normalizeFileHint, canonicalStatus, STATUS_ALIASES,
   listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,
   createRun, newRunId, slugify,
-  depsSatisfied, summarizeTasks,
+  depsSatisfied, tasksInDependencyCycle, summarizeTasks,
 };

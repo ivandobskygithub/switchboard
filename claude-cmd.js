@@ -1,4 +1,5 @@
 const path = require('path');
+const { hasSubmitChars } = require('./submit-chars');
 
 const UUID_RE = /^[0-9a-fA-F-]{8,64}$/;
 const WORKTREE_RE = /^[A-Za-z0-9_.\-\/]{1,128}$/;
@@ -68,7 +69,10 @@ function buildClaudeCmd({ sessionId, isNew, sessionOptions, tmpPromptPath }) {
   if (sessionOptions?.initialPrompt) {
     const prompt = String(sessionOptions.initialPrompt);
     if (prompt.length > 8192) return { ok: false, error: 'initialPrompt too long' };
-    if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(prompt)) {
+    // Reject control chars (allowing \t and \n) plus the Unicode line/
+    // paragraph separators and NEL that some terminals submit as Enter — so
+    // an agent-derived initialPrompt can't smuggle an extra submitted line.
+    if (hasSubmitChars(prompt, { allowTab: true, allowNewline: true })) {
       return { ok: false, error: 'initialPrompt contains control characters' };
     }
     cmd += ` ${shq(prompt)}`;

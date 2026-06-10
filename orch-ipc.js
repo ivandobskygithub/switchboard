@@ -84,6 +84,8 @@ function init(log, deps) {
       isSessionBusy: deps.isSessionBusy,
       seedSessionJsonl,
       ensureTaskWorktree: wt.ensureTaskWorktree,
+      removeTaskWorktree: wt.removeTaskWorktree,
+      removeRunWorktrees: wt.removeRunWorktrees,
       rolePrompt: tpl.rolePrompt,
     },
   });
@@ -141,12 +143,22 @@ function init(log, deps) {
     }
     const rDir = proto.runDir(resolved, runId);
     let file;
+    // `..` is impossible here ('/' isn't in the review charset and the spec
+    // path is fixed), but a worker could plant a symlink under reviews/ that
+    // points outside the run dir. Resolve real paths and require containment
+    // before reading, so a symlink can't exfiltrate arbitrary files.
     if (which === 'spec') file = path.join(rDir, 'tasks', `${taskId}.spec.md`);
     else if (typeof which === 'string' && /^reviews\/[A-Za-z0-9._-]+\.md$/.test(which)) {
       file = path.join(rDir, which);
     } else return { ok: false, error: 'invalid file selector' };
     try {
-      return { ok: true, content: fs.readFileSync(file, 'utf8'), path: file };
+      const realDir = fs.realpathSync(rDir);
+      const realFile = fs.realpathSync(file);
+      const rel = path.relative(realDir, realFile);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        return { ok: false, error: 'file escapes the run directory' };
+      }
+      return { ok: true, content: fs.readFileSync(realFile, 'utf8'), path: file };
     } catch (err) {
       return { ok: false, error: err.message };
     }

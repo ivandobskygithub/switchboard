@@ -213,6 +213,18 @@ test('orch:read-task-file serves specs and reviews, rejects traversal', async ()
     assert.equal(res.ok, false);
     res = await ipc.invoke('orch:read-task-file', project, run.id, 'T-1', 'reviews/..%2f..%2fsecrets.md');
     assert.equal(res.ok, false);
+
+    // A symlink under reviews/ pointing outside the run dir must not be read.
+    const secret = path.join(os.tmpdir(), 'sb-secret-' + Date.now() + '.md');
+    fs.writeFileSync(secret, 'TOP SECRET');
+    const linkPath = path.join(proto.runDir(project, run.id), 'reviews', 'evil.md');
+    let symlinkOk = true;
+    try { fs.symlinkSync(secret, linkPath); } catch { symlinkOk = false; } // needs privilege on win32
+    if (symlinkOk) {
+      res = await ipc.invoke('orch:read-task-file', project, run.id, 'T-1', 'reviews/evil.md');
+      assert.equal(res.ok, false, 'symlink escaping the run dir must be refused');
+      assert.match(res.error, /escapes the run directory/);
+    }
   } finally {
     mod.dispose();
   }

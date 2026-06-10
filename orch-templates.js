@@ -196,9 +196,11 @@ ${PROTOCOL_NOTES}
    from the spec (tests, lint). Fix until green.
 4. Commit ALL your changes on this branch with a clear message
    (\`<taskId>: <what changed>\`). Uncommitted work is lost work.
-5. Update your task file: re-read it, set \`status\` from \`in_progress\` to
-   \`needs_review\`, fill \`summary\` with 2-4 sentences (what changed, how it
-   was verified), write it back.
+5. Update your task file: re-read it, set \`status\` to EXACTLY the string
+   \`needs_review\` (not "needs_revision", "done", or any variant — the only
+   accepted values are the ones listed in the status enum above), fill
+   \`summary\` with 2-4 sentences (what changed, how it was verified), write
+   it back.
 6. Append a line to \`../../runs/<runId>/events.jsonl\`:
    \`{"ts":"<iso>","type":"note","actor":"worker","task":"<taskId>","text":"<summary>"}\`
 
