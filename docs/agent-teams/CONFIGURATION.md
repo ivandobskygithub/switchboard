@@ -8,6 +8,10 @@ Everything is configured in `run.json` (created from the New-run dialog or
 - [Roles](#roles)
 - [Model tiers](#model-tiers)
 - [Policy](#policy)
+- [Review (multi-lens)](#review-multi-lens)
+- [Phase gates](#phase-gates)
+- [Budget caps](#budget-caps)
+- [Cost telemetry](#cost-telemetry)
 - [Task schema](#task-schema)
 - [Profiles (how a model is selected)](#profiles-how-a-model-is-selected)
 - [guidelines.md](#guidelinesmd)
@@ -123,6 +127,91 @@ Reviewer: `task.reviewerProfileId` → `tiers[...].reviewerProfileId` →
 | `autoMerge` | `true` | The master merges approved tasks (the master prompt honours this; flip off to gate merges on you). |
 | `maxAttempts` | `3` | A task that fails to spawn or is rejected this many times is `blocked`. |
 | `isolation` | `worktree` | `worktree` = one git worktree per task (recommended; needs a git repo). `none` = shared working dir (only safe at low concurrency or with disjoint files). |
+| `gatesEnabled` | `true` | Run phase gates (below). |
+| `validateCmd` | `null` | Default phase-gate command (a chunk's own `validateCmd` overrides). |
+| `maxBudgetUsd` | `null` | Stop-loss in USD (needs provider cost data — see [Budget caps](#budget-caps)). |
+| `maxOutputTokens` | `null` | Stop-loss in output tokens (always works). |
+
+---
+
+## Review (multi-lens)
+
+Each task is reviewed through one or more **lenses**, each a separate reviewer
+session (possibly a different model) writing its own verdict file; Switchboard
+aggregates them. Lenses:
+
+| Lens | Checks |
+|---|---|
+| `spec` | spec/PRD/goal conformance — does it do exactly what's required? |
+| `functionality` | correctness, edge cases, integration without breaking callers |
+| `tests` | tests exist, assert real behaviour, fail on regression |
+| `security` | injection, traversal, secrets, unsafe input, authn/authz |
+| `style` | matches guidelines.md + surrounding code; naming, duplication, clarity |
+
+```json
+"review": {
+  "lensesByComplexity": {            // optional — override the cost-aware default
+    "trivial":  ["functionality", "style"],
+    "critical": ["spec", "functionality", "tests", "security", "style"]
+  },
+  "lenses": ["spec", "functionality"], // optional flat override (all tasks)
+  "quorum": "all",                     // "all" (default) or an integer N
+  "enabled": true                      // false → auto-approve (not recommended)
+}
+```
+
+**Default (no `review` config):** lens depth scales with complexity —
+`trivial`: functionality+style · `low`: +tests · `medium`: +spec ·
+`high`/`critical`: +security. This keeps cheap tasks cheap and reserves the
+full 5-lens gate for hard ones.
+
+**Resolution** for a task's lenses: per-task `lenses` → `review.lensesByComplexity[tier]`
+→ `review.lenses` → the cost-aware default. **Quorum**: `all` means every lens
+must approve (recommended — a single security blocker stops the merge); an
+integer N means at least N of the applied lenses must approve.
+
+Per-task overrides: `task.lenses` (which lenses), `task.profileId` /
+`task.reviewerProfileId` (which models).
+
+---
+
+## Phase gates
+
+A deterministic build-stays-green check, run by Switchboard (not just promised
+by a prompt). A **chunk** carries a `validateCmd` (or `policy.validateCmd` as
+the default). When every leaf of the chunk is `done`, Switchboard runs the
+command in the integration worktree via your shell; the chunk becomes `done`
+only if it passes (exit 0), else `blocked` with the output — the master then
+adds fix tasks and re-opens the chunk. Set `policy.gatesEnabled: false` to
+disable. Timeout: 10 minutes per gate.
+
+> **Trust note:** `validateCmd` runs a shell command in your repo. It comes
+> from the New-run dialog (you) or `run.json`. Treat it like any command you'd
+> run yourself; don't point a run at an untrusted `run.json`.
+
+---
+
+## Budget caps
+
+Stop-loss for unattended runs. When spend crosses a cap, Switchboard
+auto-pauses the run and nudges the master.
+
+| Cap | Reliability |
+|---|---|
+| `policy.maxOutputTokens` | Always works (tokens are always recorded). |
+| `policy.maxBudgetUsd` | Only fires when the session transcripts carry real cost figures (provider-dependent); otherwise inert. |
+
+Resume by raising the cap (edit `run.json`) and setting `status` back to
+`active`, or finish manually.
+
+---
+
+## Cost telemetry
+
+`orch:get-run` returns a `cost` roll-up — `{ run, byTask, byTier }` — summing
+input/output/cache tokens (and cost when present) by each task's session ids.
+Shown in the run header (total, vs cap) and on each card (per-task). Tokens are
+always real; cost only appears when the provider records it (never estimated).
 
 ---
 
@@ -145,6 +234,8 @@ fields. Validated on every read — invalid files surface as a board warning.
 | `acceptance` | string[] | Criteria the worker self-verifies and the reviewer checks. |
 | `profileId` | profile id | Optional explicit worker-model override (beats the tier). |
 | `reviewerProfileId` | profile id | Optional explicit reviewer-model override. |
+| `lenses` | string[] | Optional per-task review lens override. |
+| `validateCmd` | string | Phase gate for a `chunk` (overrides `policy.validateCmd`). |
 | `sessionIds` | string[] | Worker session ids (Switchboard-managed). |
 | `reviewSessionIds` | string[] | Reviewer session ids. |
 | `reviews` | `[{file,verdict}]` | Review history. |

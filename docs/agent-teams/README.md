@@ -200,18 +200,30 @@ tier roster.
    booted with `/sb-work`. Concurrency respects the global cap, per-tier caps,
    dependencies, and **file-overlap** (two tasks touching the same file never
    run at once).
-5. **Review** (automatic). A worker that finishes sets its task
-   `needs_review`; the spawner launches a **reviewer** session (its own model)
-   booted with `/sb-review`. The reviewer writes a verdict file and sets
-   `approved` or `changes_requested`. Rejected work is fed back to the worker.
-6. **Merge** (master, via nudge). When tasks are `approved`, Switchboard types
+5. **Review** (automatic, multi-lens). A worker that finishes sets its task
+   `needs_review`; the spawner launches one **reviewer** session per applicable
+   lens (spec, functionality, tests, security, style — depth scales with
+   complexity), each with its own focused prompt and possibly its own model.
+   Each writes a verdict file; Switchboard aggregates them (approved only if
+   the quorum approves). Rejected work is fed back to the worker with every
+   rejecting lens's findings. See [Review](CONFIGURATION.md#review-multi-lens).
+6. **Phase gate** (automatic). When every leaf of a chunk is done, Switchboard
+   runs the chunk's `validateCmd` (lint/tests) in the integration worktree and
+   only completes the chunk if it passes — keeping the build green as layers
+   land. See [Phase gates](CONFIGURATION.md#phase-gates).
+7. **Merge** (master, via nudge). When tasks are `approved`, Switchboard types
    a one-line nudge into the idle master terminal; the master runs
    `/sb-orchestrate`, merges approved branches into the integration branch in
    the **integration worktree**, runs the chunk's validation gate, marks tasks
    `done`, and advances to the next chunk.
-7. **Finish.** When every chunk is done and validation passes, the master sets
+8. **Finish.** When every chunk is done and validation passes, the master sets
    the run `done` and tells you how to merge the integration branch into your
    main branch. Switchboard cleans up the run's worktrees.
+
+Throughout, **cost is tracked** (tokens per task/tier/run, cost when the
+provider reports it) and **budget caps** (`maxBudgetUsd` / `maxOutputTokens`)
+auto-pause a run that overspends. See [Cost](CONFIGURATION.md#cost-telemetry)
+and [Budget caps](CONFIGURATION.md#budget-caps).
 
 After step 3, **no human input is required** — but every session is watchable
 and every decision is overridable from the board.

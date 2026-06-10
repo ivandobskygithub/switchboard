@@ -5,40 +5,25 @@ priority order. Each item notes **impact**, **effort**, and a **sketch** so it's
 actionable. Nothing here blocks the current feature — it works end to end — but
 this is where to invest next.
 
-## Tier 1 — highest leverage
+## Tier 1 — SHIPPED ✅
 
-### 1. Cost & token telemetry per run
-**Impact: high. Effort: medium.** You're optimising for cost but can't yet *see*
-it. Every session's JSONL records `usage` (tokens) and Claude Code can emit
-cost. Roll this up per task / tier / run and show it in the run header and on
-cards ("T-103 · $0.04 · 12k tok"), plus a per-tier spend bar so you can tell
-whether your tiering is actually saving money.
-*Sketch:* a worker that parses each session's JSONL `usage` (Switchboard already
-indexes these files), aggregates by the task's `sessionIds`, and surfaces via a
-new `orch:get-run` field. Optionally wire `CLAUDE_CODE_ENABLE_TELEMETRY`/OTEL
-for live metrics.
+The original Tier-1 list is now implemented:
 
-### 2. Budget caps (stop-loss)
-**Impact: high. Effort: low–medium.** A runaway loop on a paid model is the main
-cost risk in unattended runs. Add `run.policy.maxBudgetUsd` (whole run) and/or
-per-tier budgets; when exceeded, auto-pause the run and nudge you. Headless
-`claude -p` supports `--max-budget-usd`; for interactive sessions, derive spend
-from telemetry (item 1) and pause when crossed.
+1. **Cost & token telemetry** — `orch-cost.js` rolls usage up per task / tier /
+   run; shown in the run header and on cards. See
+   [CONFIGURATION → Cost telemetry](CONFIGURATION.md#cost-telemetry).
+2. **Budget caps (stop-loss)** — `policy.maxBudgetUsd` / `maxOutputTokens`
+   auto-pause the run and nudge the master. See
+   [Budget caps](CONFIGURATION.md#budget-caps).
+3. **Deterministic phase gates** — Switchboard runs a chunk's `validateCmd` in
+   the integration worktree and gates the chunk on it. See
+   [Phase gates](CONFIGURATION.md#phase-gates).
+4. **Multi-lens / quorum review** — each task is reviewed through several
+   focused lenses (spec, functionality, tests, security, style), aggregated by
+   quorum, depth scaling with complexity. See
+   [Review](CONFIGURATION.md#review-multi-lens).
 
-### 3. Deterministic validation gates
-**Impact: high. Effort: medium.** Today the chunk validation gate (lint/tests
-before `done`) is *prompt-trusted* — the master is told to run it. Make it
-engine-enforced: `run.policy.validateCmd` (or per-chunk), run via `execFile` in
-the integration worktree on `merging`, driving `merging→done|failed` directly.
-This is the single biggest "trust it to not break the build" upgrade.
-
-### 4. Multi-lens / quorum review for critical work
-**Impact: high (quality). Effort: medium.** One reviewer is a single point of
-failure for correctness. For `critical` (and optionally `high`) tasks, run
-N independent reviewers with distinct lenses and require a quorum to approve.
-Recipe and code sketch in [EXTENDING.md](EXTENDING.md#recipe-multi-lens-parallel-review).
-
-## Tier 2 — robustness & scale
+## Tier 2 — robustness & scale (next)
 
 ### 5. Stale-base worktree detection on rework
 **Impact: medium. Effort: medium.** If the master rebases the integration branch
