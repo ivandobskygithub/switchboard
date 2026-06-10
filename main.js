@@ -1818,6 +1818,25 @@ app.whenReady().then(() => {
     },
     isSessionBusy: (sessionId) => !!activeSessions.get(sessionId)?._cliBusy,
     getMainWindow: () => mainWindow,
+    // Phase-gate runner: execute a project's validation command in the
+    // integration worktree via the user's shell, capped at 10 minutes.
+    runValidation: (cmd, cwd) => new Promise((resolve) => {
+      try {
+        const globalSettings = getSetting('global') || {};
+        const profileId = globalSettings.shellProfile || SETTING_DEFAULTS.shellProfile;
+        const profile = resolveShell(profileId);
+        const child = cpSpawn(profile.path, shellArgs(profile.path, cmd, profile.args || []), {
+          cwd, env: { ...cleanPtyEnv, FORCE_COLOR: '0' }, windowsHide: true, timeout: 600_000,
+        });
+        let stdout = '', stderr = '';
+        child.stdout?.on('data', d => { stdout += d.toString(); });
+        child.stderr?.on('data', d => { stderr += d.toString(); });
+        child.on('exit', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+        child.on('error', (err) => resolve({ ok: false, code: -1, stdout, stderr: stderr + err.message }));
+      } catch (err) {
+        resolve({ ok: false, code: -1, stdout: '', stderr: err.message });
+      }
+    }),
   });
 
   profilesModule.init(log);

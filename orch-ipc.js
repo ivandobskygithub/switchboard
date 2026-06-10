@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const proto = require('./orch-protocol');
 const wt = require('./worktree-manager');
 const tpl = require('./orch-templates');
+const orchCost = require('./orch-cost');
 const { OrchWatcher } = require('./orch-watcher');
 const { OrchSpawner } = require('./orch-spawner');
 const { assertPathAllowed, addAllowedRoot } = require('./path-guard');
@@ -87,6 +88,8 @@ function init(log, deps) {
       removeTaskWorktree: wt.removeTaskWorktree,
       removeRunWorktrees: wt.removeRunWorktrees,
       rolePrompt: tpl.rolePrompt,
+      computeSpend: (projectPath, run, tasks) => orchCost.runUsage(projectPath, run, tasks).run,
+      runValidation: deps.runValidation, // wired in main.js (shell exec in a worktree)
     },
   });
   spawner.start();
@@ -132,7 +135,9 @@ function init(log, deps) {
     const events = proto.readEvents(resolved, runId, 200);
     let plan = null;
     try { plan = fs.readFileSync(path.join(proto.runDir(resolved, runId), 'plan.md'), 'utf8'); } catch {}
-    return { ok: true, run, tasks, invalid, events, plan, summary: proto.summarizeTasks(tasks) };
+    let cost = null;
+    try { cost = orchCost.runUsage(resolved, run, tasks); } catch {}
+    return { ok: true, run, tasks, invalid, events, plan, cost, summary: proto.summarizeTasks(tasks) };
   });
 
   ipcMain.handle('orch:read-task-file', (_e, projectPath, runId, taskId, which) => {

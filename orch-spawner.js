@@ -61,6 +61,7 @@ class OrchSpawner {
     this._protocolWarned = new Set(); // dedupe keys for protocol-warning events
     this._cleanedWorktrees = new Set(); // `${projectPath}|${runId}|${taskId}` worktrees removed
     this._cleanedRuns = new Set();   // `${projectPath}|${runId}` finished runs cleaned
+    this._gatingChunks = new Set();  // `${projectPath}|${runId}|${chunkId}` gate in flight
     this._tick = null;
     this._stopped = false;
 
@@ -130,9 +131,12 @@ class OrchSpawner {
     let acted = false;
 
     this._persistStatusAliases(projectPath, run, tasks);
+    // Stop-loss: if spend crossed a cap, pause the run before any new spawn.
+    if (this._enforceBudget(projectPath, run, tasks, policy)) return true;
     acted = this._sweepStaleTasks(projectPath, run, tasks) || acted;
     acted = this._auditProtocol(projectPath, run, tasks) || acted;
     acted = this._blockCycles(projectPath, run, tasks) || acted;
+    acted = await this._runPhaseGates(projectPath, run, tasks, policy) || acted;
     if (policy.isolation !== 'none') await this._cleanupDoneWorktrees(projectPath, run, tasks);
 
     let activeWorkers = tasks.filter(t => proto.ACTIVE_WORKER_STATUSES.has(t.status)).length;
@@ -293,6 +297,32 @@ class OrchSpawner {
     }
   }
 
+  // Stop-loss. Pause the run (and nudge the master) when spend crosses a cap.
+  // Cost is only enforced when transcripts carry real figures; the
+  // output-token cap always works. Returns true if it paused the run.
+  _enforceBudget(projectPath, run, tasks, policy) {
+    const budgetUsd = policy.maxBudgetUsd;
+    const tokenCap = policy.maxOutputTokens;
+    if (!budgetUsd && !tokenCap) return false;
+    if (!this.deps.computeSpend) return false;
+    let spend;
+    try { spend = this.deps.computeSpend(projectPath, run, tasks); } catch { return false; }
+    if (!spend) return false;
+    const overCost = budgetUsd && spend.hasCost && spend.costUSD >= budgetUsd;
+    const overTokens = tokenCap && spend.outputTokens >= tokenCap;
+    if (!overCost && !overTokens) return false;
+    const reason = overCost
+      ? `budget reached: $${spend.costUSD.toFixed(2)} ≥ $${budgetUsd}`
+      : `token budget reached: ${spend.outputTokens} ≥ ${tokenCap} output tokens`;
+    const wrote = proto.writeRun(projectPath, { ...run, status: 'paused' });
+    if (wrote.ok) {
+      proto.appendEvent(projectPath, run.id, { type: 'budget-paused', text: reason });
+      this._queueNudgeLine(projectPath, run.id, `run auto-paused — ${reason}; raise the cap or finish manually`);
+      this.log.warn(`[orch] ${run.id} auto-paused: ${reason}`);
+    }
+    return true;
+  }
+
   // dependsOn cycles would wedge every task in the cycle at `ready` forever.
   // Block them with a clear reason so the master (or the user) can fix the
   // graph, instead of an invisible deadlock.
@@ -310,6 +340,71 @@ class OrchSpawner {
       }
     }
     return acted;
+  }
+
+  // Phase gates: when every leaf of a chunk is done, validate the chunk on
+  // the integration branch and only then mark the chunk done. A failing gate
+  // blocks the chunk (the master adds fix tasks and re-opens it). This is what
+  // keeps the app working as layers build up — verified deterministically by
+  // Switchboard, not just promised by the master prompt.
+  async _runPhaseGates(projectPath, run, tasks, policy) {
+    let acted = false;
+    const chunks = tasks.filter(t => (t.kind === 'chunk' || t.kind === 'epic') && t.status === 'in_progress');
+    for (const chunk of chunks) {
+      if (!proto.allLeavesDone(chunk.id, tasks)) continue;
+      const cmd = (typeof chunk.validateCmd === 'string' && chunk.validateCmd.trim())
+        ? chunk.validateCmd : policy.validateCmd;
+
+      // No gate configured (or gates off / no runner): the phase passes by
+      // virtue of its leaves being done.
+      if (!cmd || policy.gatesEnabled === false || !this.deps.runValidation) {
+        if (this._markChunkDone(projectPath, run, chunk, null)) acted = true;
+        continue;
+      }
+      const key = `${projectPath}|${run.id}|${chunk.id}`;
+      if (this._gatingChunks.has(key)) continue; // already running this gate
+      this._gatingChunks.add(key);
+      try {
+        const cwd = policy.isolation === 'none'
+          ? projectPath
+          : path.join(proto.worktreesRoot(projectPath), `${run.id}--integration`);
+        if (policy.isolation !== 'none' && !fs.existsSync(cwd)) {
+          proto.appendEvent(projectPath, run.id, { type: 'gate-skipped', task: chunk.id, error: 'integration worktree missing' });
+          if (this._markChunkDone(projectPath, run, chunk, 'no integration worktree')) acted = true;
+          continue;
+        }
+        proto.appendEvent(projectPath, run.id, { type: 'gate-running', task: chunk.id, text: cmd });
+        const r = await this.deps.runValidation(cmd, cwd);
+        const fresh = proto.readTask(projectPath, run.id, chunk.id);
+        if (!fresh || fresh.status !== 'in_progress') continue; // moved on
+        if (r && r.ok) {
+          proto.writeTask(projectPath, run.id, { ...fresh, status: 'done', gate: { cmd, passed: true } });
+          proto.appendEvent(projectPath, run.id, { type: 'gate-passed', task: chunk.id, text: cmd });
+          this.log.info(`[orch] phase gate passed for ${run.id}/${chunk.id}`);
+        } else {
+          const detail = ((r && (r.stderr || r.stdout)) || `exit ${r && r.code}`).slice(0, 500);
+          proto.writeTask(projectPath, run.id, { ...fresh, status: 'blocked',
+            blockedReason: `phase gate failed: ${cmd}`, gate: { cmd, passed: false, detail } });
+          proto.appendEvent(projectPath, run.id, { type: 'gate-failed', task: chunk.id, text: cmd, error: detail });
+          this._queueNudgeLine(projectPath, run.id, `phase ${chunk.id} gate failed (${cmd}) — add fix tasks and re-open the chunk`);
+          this.log.warn(`[orch] phase gate FAILED for ${run.id}/${chunk.id}: ${detail}`);
+        }
+        acted = true;
+      } catch (err) {
+        proto.appendEvent(projectPath, run.id, { type: 'gate-error', task: chunk.id, error: err.message });
+      } finally {
+        this._gatingChunks.delete(key);
+      }
+    }
+    return acted;
+  }
+
+  _markChunkDone(projectPath, run, chunk, note) {
+    const fresh = proto.readTask(projectPath, run.id, chunk.id);
+    if (!fresh || fresh.status !== 'in_progress') return false;
+    proto.writeTask(projectPath, run.id, { ...fresh, status: 'done', ...(note ? { gateNote: note } : {}) });
+    proto.appendEvent(projectPath, run.id, { type: 'phase-done', task: chunk.id, text: note || 'all leaves done' });
+    return true;
   }
 
   // Worktrees accumulate otherwise: the master's /sb-merge prompt removes a

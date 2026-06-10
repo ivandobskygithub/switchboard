@@ -137,6 +137,13 @@ Write each leaf task as \`tasks/<id>.json\` with \`kind: "leaf"\`,
 tasks that are immediately implementable to \`status: "ready"\` (respecting
 dependsOn). Set the chunk task itself to \`status: "in_progress"\`.
 
+**Set the chunk's \`validateCmd\`** to the phase gate from plan.md (e.g.
+\`"validateCmd": "npm test -- auth"\`). When every leaf of the chunk is done,
+Switchboard runs this command on the integration branch; the chunk only
+becomes \`done\` if it passes. If the gate FAILS the chunk is set \`blocked\` —
+add fix leaf tasks, then set the chunk back to \`in_progress\` to re-run the
+gate. This is what keeps the build green as layers land.
+
 Switchboard auto-spawns a worker per ready task (respecting concurrency caps).
 `;
 

@@ -100,6 +100,17 @@ const DEFAULT_POLICY = Object.freeze({
   autoMerge: true,
   maxAttempts: 3,
   isolation: 'worktree', // 'worktree' | 'none' (shared dir — only safe with maxConcurrent 1 or disjoint files)
+  // Stop-loss. When spend crosses either cap the run auto-pauses and the
+  // master is nudged. null = no cap. Cost is only enforced when transcripts
+  // carry real cost figures; output-token cap always works.
+  maxBudgetUsd: null,
+  maxOutputTokens: null,
+  // Phase gates: when all of a chunk's leaf tasks are done, Switchboard runs
+  // the chunk's validateCmd (or this default) in the integration worktree and
+  // only marks the chunk done if it passes. Keeps the build green as layers
+  // land. null command = no gate (chunk completes on leaves-done alone).
+  gatesEnabled: true,
+  validateCmd: null,
 });
 
 const DEFAULT_ROLE_LIMITS = Object.freeze({ worker: 4, reviewer: 2 });
@@ -153,6 +164,15 @@ function validateRun(run) {
     if (!ROLE_RE.test(role)) return `invalid role name: ${role}`;
     if (!isPlainObject(cfg)) return `invalid role config: ${role}`;
   }
+  if (run.policy !== undefined && isPlainObject(run.policy)) {
+    for (const k of ['maxBudgetUsd', 'maxOutputTokens']) {
+      const v = run.policy[k];
+      if (v !== undefined && v !== null && (typeof v !== 'number' || v <= 0)) return `invalid policy.${k}`;
+    }
+    if (run.policy.validateCmd !== undefined && run.policy.validateCmd !== null && typeof run.policy.validateCmd !== 'string') {
+      return 'invalid policy.validateCmd';
+    }
+  }
   if (run.tiers !== undefined) {
     if (!isPlainObject(run.tiers)) return 'tiers must be an object';
     for (const [name, cfg] of Object.entries(run.tiers)) {
@@ -196,7 +216,20 @@ function validateTask(task) {
       return `invalid ${k}`;
     }
   }
+  if (task.validateCmd !== undefined && task.validateCmd !== null && typeof task.validateCmd !== 'string') {
+    return 'validateCmd must be a string';
+  }
   return null;
+}
+
+// Leaf children of a chunk/epic, and whether they're all done — the trigger
+// for running that phase's validation gate.
+function leafChildren(parentId, tasks) {
+  return tasks.filter(t => t.parent === parentId && (t.kind || 'leaf') === 'leaf');
+}
+function allLeavesDone(parentId, tasks) {
+  const kids = leafChildren(parentId, tasks);
+  return kids.length > 0 && kids.every(t => t.status === 'done');
 }
 
 // Resolve which model profile a task should run under, for a given role.
@@ -527,4 +560,5 @@ module.exports = {
   isTransitionAllowed, transitionTask,
   createRun, newRunId, slugify,
   depsSatisfied, tasksInDependencyCycle, summarizeTasks,
+  leafChildren, allLeavesDone,
 };
