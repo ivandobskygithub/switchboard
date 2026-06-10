@@ -810,6 +810,7 @@ async function showNewRunDialog() {
   submit.textContent = 'Create run & start master';
   submit.addEventListener('click', async () => {
     error.textContent = '';
+    if (!projectSel.value) { error.textContent = 'No project selected — add a project first.'; return; }
     if (!titleInput.value.trim()) { error.textContent = 'Title is required.'; return; }
     if (!goalInput.value.trim()) { error.textContent = 'Goal is required.'; return; }
     submit.disabled = true;

@@ -1825,6 +1825,10 @@ app.whenReady().then(() => {
         const globalSettings = getSetting('global') || {};
         const profileId = globalSettings.shellProfile || SETTING_DEFAULTS.shellProfile;
         const profile = resolveShell(profileId);
+        if (!profile || !profile.path) {
+          resolve({ ok: false, code: -1, stdout: '', stderr: 'no shell available to run the gate' });
+          return;
+        }
         const child = cpSpawn(profile.path, shellArgs(profile.path, cmd, profile.args || []), {
           cwd, env: { ...cleanPtyEnv, FORCE_COLOR: '0' }, windowsHide: true, timeout: 600_000,
         });

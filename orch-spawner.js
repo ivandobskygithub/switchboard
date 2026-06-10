@@ -62,6 +62,7 @@ class OrchSpawner {
     this._cleanedWorktrees = new Set(); // `${projectPath}|${runId}|${taskId}` worktrees removed
     this._cleanedRuns = new Set();   // `${projectPath}|${runId}` finished runs cleaned
     this._gatingChunks = new Set();  // `${projectPath}|${runId}|${chunkId}` gate in flight
+    this._budgetPaused = new Set();  // `${projectPath}|${runId}` already nudged about budget
     this._tick = null;
     this._stopped = false;
 
@@ -139,7 +140,7 @@ class OrchSpawner {
     acted = this._sweepStaleTasks(projectPath, run, tasks) || acted;
     acted = this._auditProtocol(projectPath, run, tasks) || acted;
     acted = this._blockCycles(projectPath, run, tasks) || acted;
-    acted = await this._runPhaseGates(projectPath, run, tasks, policy) || acted;
+    acted = this._runPhaseGates(projectPath, run, tasks, policy) || acted;
     if (policy.isolation !== 'none') await this._cleanupDoneWorktrees(projectPath, run, tasks);
 
     let activeWorkers = tasks.filter(t => proto.ACTIVE_WORKER_STATUSES.has(t.status)).length;
@@ -332,7 +333,14 @@ class OrchSpawner {
     const wrote = proto.writeRun(projectPath, { ...run, status: 'paused' });
     if (wrote.ok) {
       proto.appendEvent(projectPath, run.id, { type: 'budget-paused', text: reason });
-      this._queueNudgeLine(projectPath, run.id, `run auto-paused — ${reason}; raise the cap or finish manually`);
+      // Dedupe the nudge: if the user resumes while still over budget the run
+      // re-pauses immediately; don't spam the master each flap.
+      const flapKey = `${projectPath}|${run.id}`;
+      if (!this._budgetPaused.has(flapKey)) {
+        this._budgetPaused.add(flapKey);
+        this._queueNudgeLine(projectPath, run.id,
+          `run auto-paused — ${reason}. In-flight sessions keep running; raise the cap (run.json) or finish manually.`);
+      }
       this.log.warn(`[orch] ${run.id} auto-paused: ${reason}`);
     }
     return true;
@@ -362,7 +370,13 @@ class OrchSpawner {
   // blocks the chunk (the master adds fix tasks and re-opens it). This is what
   // keeps the app working as layers build up — verified deterministically by
   // Switchboard, not just promised by the master prompt.
-  async _runPhaseGates(projectPath, run, tasks, policy) {
+  // Non-blocking: a phase gate (e.g. `npm test`, which can take minutes) must
+  // NOT be awaited inside reconcile — reconcile is serialized per project, so
+  // awaiting here would freeze all of that project's orchestration (worker
+  // dispatch, review aggregation, the stale sweep) for the gate's duration.
+  // We start the validation in the background, guard re-entry with
+  // _gatingChunks, and apply the result + refresh when it resolves.
+  _runPhaseGates(projectPath, run, tasks, policy) {
     let acted = false;
     const chunks = tasks.filter(t => (t.kind === 'chunk' || t.kind === 'epic') && t.status === 'in_progress');
     for (const chunk of chunks) {
@@ -377,39 +391,58 @@ class OrchSpawner {
         continue;
       }
       const key = `${projectPath}|${run.id}|${chunk.id}`;
-      if (this._gatingChunks.has(key)) continue; // already running this gate
-      this._gatingChunks.add(key);
-      try {
-        const cwd = policy.isolation === 'none'
-          ? projectPath
-          : path.join(proto.worktreesRoot(projectPath), `${run.id}--integration`);
-        if (policy.isolation !== 'none' && !fs.existsSync(cwd)) {
-          proto.appendEvent(projectPath, run.id, { type: 'gate-skipped', task: chunk.id, error: 'integration worktree missing' });
-          if (this._markChunkDone(projectPath, run, chunk, 'no integration worktree')) acted = true;
-          continue;
-        }
-        proto.appendEvent(projectPath, run.id, { type: 'gate-running', task: chunk.id, text: cmd });
-        const r = await this.deps.runValidation(cmd, cwd);
+      if (this._gatingChunks.has(key)) continue; // gate already in flight
+
+      // validateCmd is agent/file-writable — refuse anything that isn't a
+      // single command (no chaining/redirection/substitution).
+      if (!proto.isSafeValidateCmd(cmd)) {
         const fresh = proto.readTask(projectPath, run.id, chunk.id);
-        if (!fresh || fresh.status !== 'in_progress') continue; // moved on
-        if (r && r.ok) {
-          proto.writeTask(projectPath, run.id, { ...fresh, status: 'done', gate: { cmd, passed: true } });
-          proto.appendEvent(projectPath, run.id, { type: 'gate-passed', task: chunk.id, text: cmd });
-          this.log.info(`[orch] phase gate passed for ${run.id}/${chunk.id}`);
-        } else {
-          const detail = ((r && (r.stderr || r.stdout)) || `exit ${r && r.code}`).slice(0, 500);
+        if (fresh && fresh.status === 'in_progress') {
           proto.writeTask(projectPath, run.id, { ...fresh, status: 'blocked',
-            blockedReason: `phase gate failed: ${cmd}`, gate: { cmd, passed: false, detail } });
-          proto.appendEvent(projectPath, run.id, { type: 'gate-failed', task: chunk.id, text: cmd, error: detail });
-          this._queueNudgeLine(projectPath, run.id, `phase ${chunk.id} gate failed (${cmd}) — add fix tasks and re-open the chunk`);
-          this.log.warn(`[orch] phase gate FAILED for ${run.id}/${chunk.id}: ${detail}`);
+            blockedReason: `phase gate command rejected as unsafe: ${cmd.slice(0, 120)}` });
+          proto.appendEvent(projectPath, run.id, { type: 'gate-rejected', task: chunk.id, text: cmd.slice(0, 200) });
+          this._queueNudgeLine(projectPath, run.id, `phase ${chunk.id} validateCmd rejected as unsafe — use a single command`);
+          acted = true;
         }
-        acted = true;
-      } catch (err) {
-        proto.appendEvent(projectPath, run.id, { type: 'gate-error', task: chunk.id, error: err.message });
-      } finally {
-        this._gatingChunks.delete(key);
+        continue;
       }
+
+      const cwd = policy.isolation === 'none'
+        ? projectPath
+        : path.join(proto.worktreesRoot(projectPath), `${run.id}--integration`);
+      if (policy.isolation !== 'none' && !fs.existsSync(cwd)) {
+        proto.appendEvent(projectPath, run.id, { type: 'gate-skipped', task: chunk.id, error: 'integration worktree missing' });
+        if (this._markChunkDone(projectPath, run, chunk, 'no integration worktree')) acted = true;
+        continue;
+      }
+
+      this._gatingChunks.add(key);
+      proto.appendEvent(projectPath, run.id, { type: 'gate-running', task: chunk.id, text: cmd });
+      acted = true;
+      Promise.resolve()
+        .then(() => this.deps.runValidation(cmd, cwd))
+        .then((r) => {
+          if (this._stopped) return;
+          const fresh = proto.readTask(projectPath, run.id, chunk.id);
+          if (!fresh || fresh.status !== 'in_progress') return;
+          if (r && r.ok) {
+            proto.writeTask(projectPath, run.id, { ...fresh, status: 'done', gate: { cmd, passed: true } });
+            proto.appendEvent(projectPath, run.id, { type: 'gate-passed', task: chunk.id, text: cmd });
+            this.log.info(`[orch] phase gate passed for ${run.id}/${chunk.id}`);
+          } else {
+            const detail = ((r && (r.stderr || r.stdout)) || `exit ${r && r.code}`).slice(0, 500);
+            proto.writeTask(projectPath, run.id, { ...fresh, status: 'blocked',
+              blockedReason: `phase gate failed: ${cmd}`, gate: { cmd, passed: false, detail } });
+            proto.appendEvent(projectPath, run.id, { type: 'gate-failed', task: chunk.id, text: cmd, error: detail });
+            this._queueNudgeLine(projectPath, run.id, `phase ${chunk.id} gate failed (${cmd}) — add fix tasks and re-open the chunk`);
+            this.log.warn(`[orch] phase gate FAILED for ${run.id}/${chunk.id}: ${detail}`);
+          }
+        })
+        .catch((err) => proto.appendEvent(projectPath, run.id, { type: 'gate-error', task: chunk.id, error: err.message }))
+        .finally(() => {
+          this._gatingChunks.delete(key);
+          if (!this._stopped) this.watcher.refresh(projectPath);
+        });
     }
     return acted;
   }
@@ -694,17 +727,16 @@ class OrchSpawner {
     }
 
     const round = (task.reviewRound || 0) + 1;
-    const tr = proto.transitionTask(projectPath, run.id, task.id, 'needs_review', 'reviewing',
-      { reviewRound: round, pendingLenses: lenses, reviewSessionIds: task.reviewSessionIds || [] });
-    if (!tr.ok) return false;
 
+    // Spawn the lens reviewers FIRST, then claim `reviewing` in a single write
+    // whose pendingLenses are EXACTLY the lenses that spawned — so aggregation
+    // can never wait on a lens that never started. Safe because reconcile is
+    // serialized per project, so the task can't be re-dispatched mid-spawn.
     const prep = await this._prepareCwd(projectPath, run, policy, task);
     if (!prep.ok) {
-      proto.transitionTask(projectPath, run.id, task.id, 'reviewing', 'needs_review', { pendingLenses: [] });
       proto.appendEvent(projectPath, run.id, { type: 'review-spawn-failed', task: task.id, error: prep.error });
       return false;
     }
-
     const spawnedLenses = [];
     const sessionIds = [...(task.reviewSessionIds || [])];
     for (const lens of lenses) {
@@ -724,16 +756,16 @@ class OrchSpawner {
         proto.appendEvent(projectPath, run.id, { type: 'review-spawn-failed', task: task.id, lens, error: spawn.error });
       }
     }
+    if (spawnedLenses.length === 0) return false; // task stays needs_review; retried next pass
 
-    if (spawnedLenses.length === 0) {
-      proto.transitionTask(projectPath, run.id, task.id, 'reviewing', 'needs_review', { pendingLenses: [] });
-      return false;
-    }
-    // Only require the lenses that actually spawned (a failed lens shouldn't
-    // wedge aggregation; the timeline records the gap).
-    const cur = proto.readTask(projectPath, run.id, task.id);
-    if (cur && cur.status === 'reviewing' && cur.reviewRound === round) {
-      proto.writeTask(projectPath, run.id, { ...cur, pendingLenses: spawnedLenses, reviewSessionIds: sessionIds });
+    const tr = proto.transitionTask(projectPath, run.id, task.id, 'needs_review', 'reviewing',
+      { reviewRound: round, pendingLenses: spawnedLenses, reviewSessionIds: sessionIds });
+    if (!tr.ok) {
+      // A concurrent writer moved the task between spawn and claim — the lens
+      // sessions are running but unrecorded; the file-based review sweep and
+      // the next pass reconcile it. Make it visible.
+      proto.appendEvent(projectPath, run.id, { type: 'orphan-review', task: task.id, error: tr.error });
+      return true;
     }
     this.log.info(`[orch] ${spawnedLenses.length}-lens review dispatched for ${run.id}/${task.id} (round ${round}): ${spawnedLenses.join(', ')}`);
     return true;
@@ -763,21 +795,22 @@ class OrchSpawner {
       }
       if (!allIn) continue;
 
-      const approvals = Object.values(verdicts).filter(v => v.verdict === 'approved').length;
-      const quorum = proto.lensQuorum(run, lenses.length);
-      const passed = approvals >= quorum;
+      const verdictList = Object.values(verdicts);
+      const outcome = proto.reviewOutcome(run, verdictList);
+      const passed = outcome.passed;
       const fresh = proto.readTask(projectPath, run.id, task.id);
       if (!fresh || fresh.status !== 'reviewing' || fresh.reviewRound !== round) continue;
-      const reviewEntries = Object.values(verdicts).map(v => ({ file: v.file, verdict: v.verdict, lens: v.lens, round }));
+      const reviewEntries = verdictList.map(v => ({ file: v.file, verdict: v.verdict, lens: v.lens, round }));
       const next = proto.transitionTask(projectPath, run.id, task.id, 'reviewing',
         passed ? 'approved' : 'changes_requested',
         { reviews: [...(fresh.reviews || []), ...reviewEntries], pendingLenses: [] });
       if (next.ok) {
         acted = true;
-        const summary = Object.values(verdicts).map(v => `${v.lens}:${v.verdict === 'approved' ? '✓' : '✗'}`).join(' ');
+        const summary = verdictList.map(v => `${v.lens}:${v.verdict === 'approved' ? '✓' : '✗'}`).join(' ');
+        const why = outcome.vetoed ? ' (security veto)' : '';
         proto.appendEvent(projectPath, run.id, {
           type: passed ? 'review-approved' : 'review-changes-requested',
-          task: task.id, text: `${approvals}/${lenses.length} lenses approved (${summary})`,
+          task: task.id, text: `${outcome.approvals}/${lenses.length} lenses approved${why} (${summary})`,
         });
         this.log.info(`[orch] review aggregated for ${run.id}/${task.id}: ${passed ? 'approved' : 'changes_requested'} (${summary})`);
       }

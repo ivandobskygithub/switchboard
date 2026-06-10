@@ -99,14 +99,51 @@ function lensQuorum(run, lensCount) {
   return lensCount; // 'all'
 }
 
-// Parse a verdict from a review markdown file's text.
+// Lenses whose rejection is a hard veto: even under a numeric quorum, if one
+// of these requested changes, the task does NOT pass. Security is the obvious
+// one (a single vulnerability should block a merge no matter the vote).
+const VETO_LENSES = ['security'];
+
+// Parse a verdict from a review markdown file. We anchor on the line that
+// declares the verdict (the prompt requires the FIRST line to be
+// "Verdict: ..."), scanning lines so a stray "approved" in the findings body
+// can't be misread, and we handle negations ("not approved" → changes).
 function parseVerdict(text) {
   if (typeof text !== 'string') return null;
-  const m = text.match(/verdict[\s:*_\-–—]*(approved|changes[_\s-]?requested|approve|reject(?:ed)?|block(?:ed)?)/i);
-  if (!m) return null;
-  const v = m[1].toLowerCase().replace(/[\s_-]+/g, '_');
-  if (v.startsWith('approve')) return 'approved';
-  return 'changes_requested';
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[#>*\-\s]+/, '');
+    const m = line.match(/^verdict[\s:*_\-–—]*(.+)$/i);
+    if (!m) continue;
+    const rest = m[1].toLowerCase();
+    // Explicit negation flips an "approve" reading.
+    if (/\b(not|cannot|can't|isn't|won't|no)\b.*\bapprov/.test(rest)) return 'changes_requested';
+    if (/\b(approved|approve|lgtm|pass(?:ed|es)?|ok)\b/.test(rest)) return 'approved';
+    if (/\b(changes[_\s-]?requested|reject(?:ed)?|block(?:ed)?|fail(?:ed|s)?|deny|denied)\b/.test(rest)) return 'changes_requested';
+  }
+  return null;
+}
+
+// Decide a task's review outcome from its per-lens verdicts. `verdicts` is an
+// array of { lens, verdict }. A veto lens that requested changes forces a
+// changes_requested; otherwise approve iff approvals ≥ quorum.
+function reviewOutcome(run, verdicts) {
+  const total = verdicts.length;
+  const approvals = verdicts.filter(v => v.verdict === 'approved').length;
+  const vetoed = verdicts.some(v => VETO_LENSES.includes(v.lens) && v.verdict !== 'approved');
+  if (vetoed) return { passed: false, approvals, total, vetoed: true };
+  return { passed: approvals >= lensQuorum(run, total), approvals, total, vetoed: false };
+}
+
+// A validation command runs in the user's shell in the integration worktree.
+// It comes from run.json (agent/file-writable), so refuse anything that chains
+// commands, redirects, substitutes, or globs into another command — a phase
+// gate is a single program with arguments (e.g. "npm test -- auth"). This
+// blocks "; rm -rf /", "&& curl|sh", "$(...)", backticks, redirects, etc.
+function isSafeValidateCmd(cmd) {
+  if (typeof cmd !== 'string' || !cmd.trim()) return false;
+  if (cmd.length > 4096) return false;
+  if (/[;&|`$<>(){}\n\r\\!*?~#]/.test(cmd)) return false;
+  return true;
 }
 
 // Task status machine. Keys are "from" statuses; values are the set of
@@ -232,7 +269,8 @@ function validateRun(run) {
       const v = run.policy[k];
       if (v !== undefined && v !== null && (typeof v !== 'number' || v <= 0)) return `invalid policy.${k}`;
     }
-    if (run.policy.validateCmd !== undefined && run.policy.validateCmd !== null && typeof run.policy.validateCmd !== 'string') {
+    if (run.policy.validateCmd !== undefined && run.policy.validateCmd !== null
+      && (typeof run.policy.validateCmd !== 'string' || run.policy.validateCmd.length > 4096)) {
       return 'invalid policy.validateCmd';
     }
   }
@@ -295,8 +333,9 @@ function validateTask(task) {
       return `invalid ${k}`;
     }
   }
-  if (task.validateCmd !== undefined && task.validateCmd !== null && typeof task.validateCmd !== 'string') {
-    return 'validateCmd must be a string';
+  if (task.validateCmd !== undefined && task.validateCmd !== null
+    && (typeof task.validateCmd !== 'string' || task.validateCmd.length > 4096)) {
+    return 'validateCmd must be a string under 4096 chars';
   }
   if (task.lenses !== undefined && (!Array.isArray(task.lenses) || task.lenses.some(l => !LENS_KEYS.includes(l)))) {
     return 'invalid task.lenses';
@@ -652,6 +691,7 @@ module.exports = {
   validateRun, validateTask, normalizeFileHint, canonicalStatus, STATUS_ALIASES,
   COMPLEXITIES, DEFAULT_COMPLEXITY, resolveProfile, tierCap, taskComplexity,
   REVIEW_LENSES, LENS_KEYS, DEFAULT_LENSES_BY_COMPLEXITY, resolveLenses, lensQuorum, parseVerdict,
+  reviewOutcome, VETO_LENSES, isSafeValidateCmd,
   listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,

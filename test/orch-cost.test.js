@@ -72,6 +72,28 @@ test('runUsage rolls up per task, per tier, and the run total (incl. master)', (
   assert.ok(Math.abs(roll.run.costUSD - 0.57) < 1e-9);
 });
 
+test('encodeFolder matches encode-project-path for long paths (no cost misattribution)', () => {
+  const projects = setupProjects();
+  const { encodeProjectPath } = require('../encode-project-path');
+  // Two distinct >200-char worktree paths that share a 200-char prefix.
+  const base = 'D:/' + 'x'.repeat(210);
+  const cwdA = base + '/projA/.switchboard/worktrees/run--T-1';
+  const cwdB = base + '/projB/.switchboard/worktrees/run--T-2';
+  // Canonical encoder gives them DIFFERENT folders (hash suffix).
+  assert.notEqual(encodeProjectPath(cwdA), encodeProjectPath(cwdB));
+  const folderA = encodeProjectPath(cwdA);
+  const d = path.join(projects, folderA);
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'long-1.jsonl'),
+    JSON.stringify({ type: 'assistant', message: { usage: { output_tokens: 42 } } }) + '\n');
+  // A session under cwdA resolves to folderA via the canonical encoder —
+  // the PRIMARY candidate lookup hits, no reliance on the scan fallback and
+  // no truncation collision with cwdB's folder.
+  assert.notEqual(path.join(projects, encodeProjectPath(cwdB)), d);
+  const u = cost.sessionUsage('long-1', [cwdA]);
+  assert.equal(u.outputTokens, 42);
+});
+
 test('runUsage falls back to scanning when worktree folder is unknown', () => {
   const projects = setupProjects();
   // transcript filed under some unrelated folder name

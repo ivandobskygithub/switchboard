@@ -103,3 +103,16 @@ test('validateRun rejects non-positive budget caps', () => {
   assert.equal(proto.validateRun({ ...run, policy: { maxOutputTokens: 0 } }), 'invalid policy.maxOutputTokens');
   assert.equal(proto.validateRun({ ...run, policy: { maxBudgetUsd: 5, maxOutputTokens: 1000 } }), null);
 });
+
+test('validateRun bounds validateCmd length; isSafeValidateCmd rejects chaining', () => {
+  const project = tmpProject();
+  const { run } = proto.createRun(project, { title: 'b', roles: ROLES });
+  assert.equal(proto.validateRun({ ...run, policy: { validateCmd: 'x'.repeat(5000) } }), 'invalid policy.validateCmd');
+  assert.equal(proto.validateRun({ ...run, policy: { validateCmd: 'npm test' } }), null);
+  // safety predicate
+  assert.equal(proto.isSafeValidateCmd('npm test -- auth'), true);
+  assert.equal(proto.isSafeValidateCmd('npm run test:unit'), true);
+  for (const bad of ['npm test; rm -rf /', 'a && b', 'a | b', '$(x)', '`x`', 'a > f', 'a\nb', 'curl x|sh']) {
+    assert.equal(proto.isSafeValidateCmd(bad), false, `must reject: ${bad}`);
+  }
+});

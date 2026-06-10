@@ -14,15 +14,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const proto = require('./orch-protocol');
+const { encodeProjectPath } = require('./encode-project-path');
 
 let PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
-function setProjectsDirForTesting(dir) { PROJECTS_DIR = dir; }
+function setProjectsDirForTesting(dir) { PROJECTS_DIR = dir; _cache.clear(); }
 
-function encodeFolder(p) {
-  // Mirrors encode-project-path.js / Claude CLI folder naming.
-  const sanitized = String(p).replace(/[^a-zA-Z0-9]/g, '-');
-  return sanitized.length <= 200 ? sanitized : sanitized.slice(0, 200);
-}
+// MUST match Claude CLI's folder naming exactly (hash suffix for >200 chars),
+// or transcripts for long worktree paths land in the wrong / a missing folder
+// and cost is misattributed. Reuse the canonical encoder.
+function encodeFolder(p) { return encodeProjectPath(p); }
+
+// Per-file usage cache keyed by path → {mtimeMs, usage}. computeSpend runs
+// every reconcile when a budget cap is set; without this it would re-parse
+// every transcript each pass. A stat is cheap; a re-parse only on change.
+const _cache = new Map();
 
 function emptyUsage() {
   return { inputTokens: 0, outputTokens: 0, cacheTokens: 0, costUSD: 0, hasCost: false, sessions: 0, found: false };
@@ -60,6 +65,11 @@ function sessionUsage(sessionId, candidateCwds) {
   const out = emptyUsage();
   if (!file) return out;
   out.sessions = 1;
+  // Skip re-parsing an unchanged transcript.
+  let mtimeMs = 0;
+  try { mtimeMs = fs.statSync(file).mtimeMs; } catch { return out; }
+  const cached = _cache.get(file);
+  if (cached && cached.mtimeMs === mtimeMs) return { ...cached.usage, sessions: 1 };
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { return out; }
   for (const line of raw.split('\n')) {
@@ -78,6 +88,7 @@ function sessionUsage(sessionId, candidateCwds) {
     const cost = e?.costUSD ?? e?.total_cost_usd ?? e?.message?.costUSD;
     if (typeof cost === 'number' && cost > 0) { out.costUSD += cost; out.hasCost = true; }
   }
+  _cache.set(file, { mtimeMs, usage: { ...out } });
   return out;
 }
 

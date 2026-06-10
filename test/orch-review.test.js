@@ -78,6 +78,96 @@ test('parseVerdict reads many phrasings', () => {
   assert.equal(proto.parseVerdict('no verdict here'), null);
 });
 
+test('parseVerdict is line-anchored and negation-aware (no false positives)', () => {
+  // "approved" appearing in the body must NOT win — only the Verdict line.
+  assert.equal(proto.parseVerdict('The code looks approved-ish but\nVerdict: changes_requested\n- blocker'), 'changes_requested');
+  // explicit negation on the verdict line
+  assert.equal(proto.parseVerdict('Verdict: not approved'), 'changes_requested');
+  assert.equal(proto.parseVerdict('Verdict: cannot be approved — see blockers'), 'changes_requested');
+  // markdown decoration around the line
+  assert.equal(proto.parseVerdict('> **Verdict**: approved'), 'approved');
+  // a body that merely mentions "approved" with no verdict line
+  assert.equal(proto.parseVerdict('Looks approved to me.'), null);
+});
+
+test('reviewOutcome: security is a hard veto even under a numeric quorum', () => {
+  const run = proto.createRun(tmpProject(), { title: 'r', roles: ROLES, review: { quorum: 2 } }).run;
+  // 3 approve, security rejects → NOT passed (veto), despite quorum 2 met.
+  const withSec = proto.reviewOutcome(run, [
+    { lens: 'spec', verdict: 'approved' },
+    { lens: 'functionality', verdict: 'approved' },
+    { lens: 'tests', verdict: 'approved' },
+    { lens: 'security', verdict: 'changes_requested' },
+  ]);
+  assert.equal(withSec.passed, false);
+  assert.equal(withSec.vetoed, true);
+  // Same votes but the rejecter is a non-veto lens → quorum 2 passes.
+  const noVeto = proto.reviewOutcome(run, [
+    { lens: 'spec', verdict: 'approved' },
+    { lens: 'functionality', verdict: 'approved' },
+    { lens: 'style', verdict: 'changes_requested' },
+  ]);
+  assert.equal(noVeto.passed, true);
+});
+
+test('a security-lens rejection blocks the task end to end (veto over quorum)', async () => {
+  const project = tmpProject();
+  const run = activeRun(project, { review: { lenses: ['spec', 'functionality', 'security'], quorum: 1 } });
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'needs_review', kind: 'leaf', complexity: 'high' });
+  const { deps } = harness(project, run.id, { security: 'changes_requested' }); // spec+functionality approve
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);
+    watcher.refresh(project);
+    await spawner.reconcile(project);
+    assert.equal(proto.readTask(project, run.id, 'T-1').status, 'changes_requested',
+      'quorum 1 is met by 2 approvals, but the security veto blocks it');
+    assert.ok(proto.readEvents(project, run.id).some(e => e.type === 'review-changes-requested' && /veto/.test(e.text)));
+  } finally { spawner.stop(); watcher.dispose(); }
+});
+
+test('partial lens-spawn records only the spawned lenses (aggregation never wedges)', async () => {
+  const project = tmpProject();
+  const run = activeRun(project);
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'a', status: 'needs_review', kind: 'leaf', complexity: 'high' });
+  // Fail the 'security' spawn; the others succeed and write files.
+  let calls = 0;
+  const active = new Set([MASTER]);
+  const deps = {
+    openTerminal: async (sessionId, cwd, isNew, opts) => {
+      calls++;
+      const m = /^\/sb-review (\S+) (\S+) (\S+)/.exec(opts.initialPrompt || '');
+      const lens = m && m[3];
+      if (lens === 'security') return { ok: false, error: 'pty failed' };
+      const round = proto.readTask(project, run.id, 'T-1').reviewRound || 1;
+      const dir = path.join(proto.runDir(project, run.id), 'reviews');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `T-1-${lens}-${round}.md`), 'Verdict: approved\n');
+      active.add(sessionId);
+      return { ok: true };
+    },
+    sendInput: () => true, isSessionActive: (id) => active.has(id), isSessionBusy: () => false,
+    seedSessionJsonl: () => true, ensureTaskWorktree: async () => ({ ok: false }),
+    rolePrompt: () => 'base', newSessionId: (() => { let n = 0; return () => `s-${++n}`; })(),
+  };
+  const watcher = new OrchWatcher();
+  const spawner = new OrchSpawner({ watcher, deps });
+  try {
+    watcher.watchProject(project);
+    await spawner.reconcile(project);
+    const task = proto.readTask(project, run.id, 'T-1');
+    assert.equal(task.status, 'reviewing');
+    assert.ok(!task.pendingLenses.includes('security'), 'failed lens not required');
+    assert.equal(task.pendingLenses.length, 4); // spec, functionality, tests, style
+    watcher.refresh(project);
+    await spawner.reconcile(project);
+    // aggregation completes on the 4 spawned lenses, does not wait on security
+    assert.equal(proto.readTask(project, run.id, 'T-1').status, 'approved');
+  } finally { spawner.stop(); watcher.dispose(); }
+});
+
 test('all lenses approve → task approved with one entry per lens', async () => {
   const project = tmpProject();
   const run = activeRun(project);
