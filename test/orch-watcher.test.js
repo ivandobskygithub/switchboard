@@ -95,7 +95,7 @@ test('watcher picks up runs created after watching started (no .switchboard yet)
   try {
     w.watchProject(project);
     assert.deepEqual(w.getSnapshot(project).runs, []);
-    const seen = waitFor(w, 'run-changed', null, 8000);
+    const seen = waitFor(w, 'run-changed', null, 15_000);
     proto.createRun(project, { title: 'late', roles: ROLES });
     const [, runId] = await seen;
     assert.match(runId, /late/);

@@ -248,6 +248,17 @@ test('Electron UI renders the Agent Teams board and applies a human action',
       const planText = await cdp.eval(`document.getElementById('orch-plan-md').textContent`);
       assert.match(planText, /UI demo plan/);
 
+      // Run-level control: Pause round-trips GUI → IPC → run.json → watcher → chip.
+      await cdp.eval(`[...document.querySelectorAll('.orch-action-btn')].find(b => b.textContent === 'Pause').click()`);
+      await waitUntil(() => proto.readRun(project, run.id)?.status === 'paused',
+        { label: 'run paused on disk' });
+      await waitUntil(() => cdp.eval(
+        `document.querySelector('#orch-viewer-header .orch-chip')?.textContent === 'paused'`),
+        { label: 'paused chip rendered' });
+      await cdp.eval(`[...document.querySelectorAll('.orch-action-btn')].find(b => b.textContent === 'Resume').click()`);
+      await waitUntil(() => proto.readRun(project, run.id)?.status === 'active',
+        { label: 'run resumed on disk' });
+
       // Visual artifact for humans: screenshot of the board.
       await cdp.eval(`[...document.querySelectorAll('.orch-tab-btn')].find(b => b.textContent === 'Board').click()`);
       await new Promise(r => setTimeout(r, 400));

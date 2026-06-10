@@ -86,9 +86,27 @@ function readJsonSafe(file) {
 
 function writeJsonAtomic(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  const data = JSON.stringify(obj, null, 2);
   const tmp = file + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-  fs.renameSync(tmp, file);
+  fs.writeFileSync(tmp, data);
+  // Windows can refuse the rename transiently (antivirus or a reader holding
+  // the target). Retry briefly, then fall back to a direct write — losing
+  // atomicity for one write beats losing the write entirely, and every
+  // reader of these files already tolerates a torn read (readJsonSafe →
+  // null → next watcher pass re-reads).
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (err) {
+      if (attempt >= 3 || !['EPERM', 'EBUSY', 'EACCES'].includes(err.code)) {
+        try { fs.writeFileSync(file, data); } finally {
+          try { fs.unlinkSync(tmp); } catch {}
+        }
+        return;
+      }
+    }
+  }
 }
 
 // --- validation -----------------------------------------------------------
@@ -138,17 +156,38 @@ function readRun(projectPath, runId) {
   return run;
 }
 
-function readTasks(projectPath, runId) {
+// Reads every task file, separating valid tasks from broken ones. Agent
+// writes go through models of varying quality — a malformed file must be
+// VISIBLE (GUI warning, master can fix it), never silently ignored.
+function readTasksDetailed(projectPath, runId) {
   const dir = tasksDir(runDir(projectPath, runId));
   let names = [];
-  try { names = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { return []; }
+  try { names = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { return { tasks: [], invalid: [] }; }
   const tasks = [];
+  const invalid = [];
   for (const name of names) {
     const task = readJsonSafe(path.join(dir, name));
-    if (task && !validateTask(task) && name === task.id + '.json') tasks.push(task);
+    if (!task) {
+      invalid.push({ file: `tasks/${name}`, error: 'unparseable JSON' });
+      continue;
+    }
+    const err = validateTask(task);
+    if (err) {
+      invalid.push({ file: `tasks/${name}`, error: err });
+      continue;
+    }
+    if (name !== task.id + '.json') {
+      invalid.push({ file: `tasks/${name}`, error: `filename does not match task id "${task.id}"` });
+      continue;
+    }
+    tasks.push(task);
   }
   tasks.sort((a, b) => a.id.localeCompare(b.id));
-  return tasks;
+  return { tasks, invalid };
+}
+
+function readTasks(projectPath, runId) {
+  return readTasksDetailed(projectPath, runId).tasks;
 }
 
 function readTask(projectPath, runId, taskId) {
@@ -158,11 +197,32 @@ function readTask(projectPath, runId, taskId) {
   return task;
 }
 
-// Read the last `limit` events without loading unbounded history.
+// Read the last `limit` events without loading unbounded history — only the
+// file's tail is read, so a weeks-long run with a multi-MB events.jsonl
+// costs the same as a fresh one. Corrupt/torn lines are skipped.
+const EVENTS_TAIL_BYTES = 512 * 1024;
+
 function readEvents(projectPath, runId, limit = 200) {
+  if (!Number.isInteger(limit) || limit <= 0) limit = 200;
   const file = path.join(runDir(projectPath, runId), 'events.jsonl');
   let raw;
-  try { raw = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const start = Math.max(0, size - EVENTS_TAIL_BYTES);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      raw = buf.toString('utf8');
+      if (start > 0) {
+        // We landed mid-line — drop the partial first line.
+        const nl = raw.indexOf('\n');
+        raw = nl === -1 ? '' : raw.slice(nl + 1);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch { return []; }
   const lines = raw.split('\n').filter(Boolean);
   const out = [];
   for (const line of lines.slice(-limit)) {
@@ -310,7 +370,7 @@ module.exports = {
   orchDir, runsRoot, runDir, worktreesRoot,
   readJsonSafe, writeJsonAtomic,
   validateRun, validateTask,
-  listRunIds, readRun, readTasks, readTask, readEvents,
+  listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,
   createRun, newRunId, slugify,

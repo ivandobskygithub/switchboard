@@ -1,4 +1,4 @@
-const test = require('node:test');
+﻿const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -65,12 +65,12 @@ test('transitionTask enforces the status machine', () => {
   const { run } = proto.createRun(project, { title: 'r', roles: ROLES });
   proto.writeTask(project, run.id, { id: 'T-1', title: 't', status: 'draft' });
 
-  // draft → in_progress is illegal
+  // draft â†’ in_progress is illegal
   const illegal = proto.transitionTask(project, run.id, 'T-1', 'draft', 'in_progress');
   assert.equal(illegal.ok, false);
   assert.match(illegal.error, /illegal transition/);
 
-  // draft → ready is legal
+  // draft â†’ ready is legal
   const ok = proto.transitionTask(project, run.id, 'T-1', 'draft', 'ready', { attempts: 0 }, 'master');
   assert.equal(ok.ok, true);
   assert.equal(proto.readTask(project, run.id, 'T-1').status, 'ready');
@@ -100,7 +100,7 @@ test('full lifecycle walk through the status machine', () => {
   ];
   for (const [from, to] of hops) {
     const r = proto.transitionTask(project, run.id, 'T-1', from, to);
-    assert.equal(r.ok, true, `${from} → ${to}: ${r.error || ''}`);
+    assert.equal(r.ok, true, `${from} â†’ ${to}: ${r.error || ''}`);
   }
   assert.equal(proto.readTask(project, run.id, 'T-1').status, 'done');
   // done is terminal
@@ -141,4 +141,51 @@ test('writeJsonAtomic survives concurrent-ish writers (last write wins, never to
   assert.equal(parsed.i, 49);
   // no stray tmp files left behind
   assert.deepEqual(fs.readdirSync(project).filter(f => f.includes('.tmp')), []);
+});
+
+test('readEvents skips corrupt/torn lines and survives limit <= 0', () => {
+  const project = tmpProject();
+  const { run } = proto.createRun(project, { title: 'r', roles: ROLES });
+  const file = path.join(proto.runDir(project, run.id), 'events.jsonl');
+  fs.appendFileSync(file,
+    JSON.stringify({ type: 'good-1' }) + '\n' +
+    '{"type":"torn-mid-wri' + '\n' +
+    JSON.stringify({ type: 'good-2' }) + '\n');
+  const events = proto.readEvents(project, run.id);
+  const types = events.map(e => e.type);
+  assert.ok(types.includes('good-1') && types.includes('good-2'));
+  assert.ok(!types.some(t => /torn/.test(t)));
+  // limit 0 / negative falls back to the default cap instead of "everything"
+  assert.ok(proto.readEvents(project, run.id, 0).length >= 3);
+  assert.ok(proto.readEvents(project, run.id, -5).length >= 3);
+});
+
+test('readEvents reads only the tail of a very large events.jsonl', () => {
+  const project = tmpProject();
+  const { run } = proto.createRun(project, { title: 'r', roles: ROLES });
+  const file = path.join(proto.runDir(project, run.id), 'events.jsonl');
+  const pad = 'x'.repeat(150);
+  const chunks = [];
+  for (let i = 0; i < 6000; i++) chunks.push(JSON.stringify({ type: 'evt', i, pad }));
+  fs.appendFileSync(file, chunks.join('\n') + '\n'); // ~1MB, beyond the 512KB tail window
+  const events = proto.readEvents(project, run.id, 50);
+  assert.equal(events.length, 50);
+  assert.equal(events[events.length - 1].i, 5999, 'must be the newest events');
+  assert.equal(events[0].i, 5950, 'tail must be contiguous (no torn first line)');
+});
+
+test('readTasksDetailed surfaces malformed and misnamed task files', () => {
+  const project = tmpProject();
+  const { run } = proto.createRun(project, { title: 'r', roles: ROLES });
+  proto.writeTask(project, run.id, { id: 'T-1', title: 'ok', status: 'draft', kind: 'leaf' });
+  const dir = path.join(proto.runDir(project, run.id), 'tasks');
+  fs.writeFileSync(path.join(dir, 'T-2.json'), '{ not json');
+  fs.writeFileSync(path.join(dir, 'T-3.json'), JSON.stringify({ id: 'T-3', title: 'bad status', status: 'wat' }));
+  fs.writeFileSync(path.join(dir, 'T-4.json'), JSON.stringify({ id: 'T-9', title: 'misnamed', status: 'draft' }));
+  const { tasks, invalid } = proto.readTasksDetailed(project, run.id);
+  assert.deepEqual(tasks.map(t => t.id), ['T-1']);
+  assert.equal(invalid.length, 3);
+  assert.ok(invalid.some(i => i.file === 'tasks/T-2.json' && /unparseable/.test(i.error)));
+  assert.ok(invalid.some(i => i.file === 'tasks/T-3.json' && /invalid status/.test(i.error)));
+  assert.ok(invalid.some(i => i.file === 'tasks/T-4.json' && /does not match/.test(i.error)));
 });

@@ -126,11 +126,11 @@ function init(log, deps) {
     if (!resolved) return { ok: false, error: 'project not allowed' };
     const run = proto.readRun(resolved, runId);
     if (!run) return { ok: false, error: 'run not found' };
-    const tasks = proto.readTasks(resolved, runId);
+    const { tasks, invalid } = proto.readTasksDetailed(resolved, runId);
     const events = proto.readEvents(resolved, runId, 200);
     let plan = null;
     try { plan = fs.readFileSync(path.join(proto.runDir(resolved, runId), 'plan.md'), 'utf8'); } catch {}
-    return { ok: true, run, tasks, events, plan, summary: proto.summarizeTasks(tasks) };
+    return { ok: true, run, tasks, invalid, events, plan, summary: proto.summarizeTasks(tasks) };
   });
 
   ipcMain.handle('orch:read-task-file', (_e, projectPath, runId, taskId, which) => {

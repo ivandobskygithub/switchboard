@@ -162,8 +162,8 @@ function scanProject(projectPath) {
   for (const runId of proto.listRunIds(projectPath)) {
     const run = proto.readRun(projectPath, runId);
     if (!run) continue;
-    const tasks = proto.readTasks(projectPath, runId);
-    runs.push({ run, tasks, summary: proto.summarizeTasks(tasks) });
+    const { tasks, invalid } = proto.readTasksDetailed(projectPath, runId);
+    runs.push({ run, tasks, invalid, summary: proto.summarizeTasks(tasks) });
   }
   runs.sort((a, b) => (b.run.createdAt || '').localeCompare(a.run.createdAt || ''));
   return { projectPath, scannedAt: new Date().toISOString(), runs };

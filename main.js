@@ -1794,6 +1794,13 @@ app.whenReady().then(() => {
 
   scheduleIpc.init(log, runScheduleCommand);
 
+  // Agent Teams asset pack: install /sb-* commands into ~/.claude so they
+  // resolve in every session Switchboard spawns — including worktree
+  // sessions, whose checkouts don't contain the project's .claude/commands.
+  try { require('./orch-bootstrap').ensureClaudeAssets({ log }); } catch (err) {
+    log.error(`[orch] bootstrap failed: ${err.message}`);
+  }
+
   // Agent Teams orchestration: watcher + spawner + IPC. Sessions spawned by
   // the orchestrator go through openTerminalImpl, so they behave exactly
   // like user-opened terminals (profiles, buffering, busy detection).

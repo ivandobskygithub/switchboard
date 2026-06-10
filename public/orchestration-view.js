@@ -247,6 +247,16 @@ function renderOrchHeader() {
   titleWrap.appendChild(roles);
   header.appendChild(titleWrap);
 
+  // Malformed task files (bad agent writes) must be loudly visible — they
+  // are exactly the kind of silent drift that erodes trust in automation.
+  if (orchDetail.invalid?.length) {
+    const warn = document.createElement('span');
+    warn.className = 'orch-invalid-warning';
+    warn.textContent = `⚠ ${orchDetail.invalid.length} invalid task file${orchDetail.invalid.length > 1 ? 's' : ''}`;
+    warn.title = orchDetail.invalid.map(i => `${i.file}: ${i.error}`).join('\n');
+    titleWrap.appendChild(warn);
+  }
+
   const controls = document.createElement('div');
   controls.className = 'orch-header-controls';
 

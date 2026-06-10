@@ -20,7 +20,7 @@ function resolveWorktreePath(cwd) {
   // Detect worktree paths: <project>/.claude-worktrees/<name>, <project>/.worktrees/<name>,
   // <project>/.claude/worktrees/<name>, or <project>/.switchboard/worktrees/<name> (Agent Teams).
   // Windows cwds use backslashes, so accept either separator.
-  const worktreeMatch = cwd.match(/^(.+?)[\\/]\.(?:claude[\\/]worktrees|claude-worktrees|switchboard[\\/]worktrees|worktrees)[\\/][^\\/]+[\\/]?$/);
+  const worktreeMatch = cwd.match(/^(.+?)[\\/]\.(?:claude[\\/]worktrees|claude-worktrees|switchboard[\\/]worktrees|worktrees)[\\/][^\\/]+[\\/]?$/i);
   if (worktreeMatch) {
     const parent = worktreeMatch[1];
     if (fs.existsSync(parent)) return parent;

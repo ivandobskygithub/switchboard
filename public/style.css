@@ -4939,3 +4939,4 @@ body.theme-light .session-item.needs-attention .session-status-dot.running {
 }
 .orch-form-error { color: #f85149; font-size: 12px; min-height: 14px; }
 .orch-form-submit { padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; background: transparent; border-radius: 6px; }
+.orch-invalid-warning { color: #d29922; font-size: 12px; font-weight: 600; cursor: help; }

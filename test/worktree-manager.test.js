@@ -96,6 +96,23 @@ test('re-dispatch reuses the existing task branch (commits survive)', async () =
   assert.equal(content, 'attempt 1\n');
 });
 
+test('ensureIntegrationWorktree creates and reuses; fails clearly when branch is checked out in the main worktree', async () => {
+  const repo = makeRepo();
+  const first = await wt.ensureIntegrationWorktree(repo, RUN_ID, 'teams/int');
+  assert.equal(first.ok, true, first.error);
+  assert.ok(fs.existsSync(path.join(first.path, 'README.md')));
+  const again = await wt.ensureIntegrationWorktree(repo, RUN_ID, 'teams/int');
+  assert.equal(again.reused, true);
+
+  // A branch already checked out in the user's main worktree cannot get a
+  // second checkout — must surface an error, not a phantom success.
+  const repo2 = makeRepo();
+  execFileSync('git', ['checkout', '-b', 'teams/conflict'], { cwd: repo2, windowsHide: true });
+  const conflict = await wt.ensureIntegrationWorktree(repo2, RUN_ID, 'teams/conflict');
+  assert.equal(conflict.ok, false);
+  assert.match(conflict.error, /worktree add failed/);
+});
+
 test('rejects hostile ids and branch names', async () => {
   const repo = makeRepo();
   assert.equal((await wt.ensureTaskWorktree(repo, '../evil', 'T-1', 'teams/x')).ok, false);

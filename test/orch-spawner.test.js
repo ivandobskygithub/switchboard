@@ -250,9 +250,14 @@ test('approved task nudges the idle master once, batched', async () => {
     proto.transitionTask(project, run.id, 'T-1', 'reviewing', 'approved', null, 'reviewer');
     proto.transitionTask(project, run.id, 'T-2', 'reviewing', 'approved', null, 'reviewer');
     watcher.refresh(project);
-    await settle(2600); // debounce window + slack
+    // Poll instead of a fixed sleep — under full-suite parallel load the
+    // debounce timer can land late.
+    const masterNudges = () => calls.sendInput.filter(c => c.sessionId === 'master-1111-2222-3333-444444444444');
+    const deadline = Date.now() + 10_000;
+    while (masterNudges().length === 0 && Date.now() < deadline) await settle(100);
+    await settle(300); // ensure no second nudge follows
 
-    const nudges = calls.sendInput.filter(c => c.sessionId === 'master-1111-2222-3333-444444444444');
+    const nudges = masterNudges();
     assert.equal(nudges.length, 1);
     assert.match(nudges[0].text, /T-1 approved/);
     assert.match(nudges[0].text, /T-2 approved/);

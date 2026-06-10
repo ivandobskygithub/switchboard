@@ -237,6 +237,29 @@ test('orch:watch-projects validates paths and returns state', async () => {
   }
 });
 
+test('orch:create-run reports failure but leaves a recoverable run when the master cannot start', async () => {
+  const project = makeRepo();
+  const projectsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-ipc-fail-'));
+  orchIpc.setProjectsDirForTesting(projectsDir);
+  const { ipc, mod } = makeModule({ openTerminalResult: { ok: false, error: 'pty refused' } });
+  try {
+    const res = await ipc.invoke('orch:create-run', project, {
+      title: 'doomed', goal: 'g', roles: ROLES,
+    });
+    assert.equal(res.ok, false);
+    assert.match(res.error, /master session failed/);
+    // The run survives on disk with the master id recorded, so the GUI's
+    // "Master session" button can resume it — no orphaned half-state.
+    const runId = proto.listRunIds(project)[0];
+    const run = proto.readRun(project, runId);
+    assert.ok(run.masterSessionId, 'masterSessionId recorded for recovery');
+    const events = proto.readEvents(project, runId);
+    assert.ok(events.some(e => /master spawn failed/.test(e.text || '')));
+  } finally {
+    mod.dispose();
+  }
+});
+
 test('seedSessionJsonl writes a resumable transcript with slug', () => {
   const projectsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-seed-'));
   orchIpc.setProjectsDirForTesting(projectsDir);
