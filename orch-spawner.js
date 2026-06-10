@@ -129,8 +129,22 @@ class OrchSpawner {
     const workerCap = run.roles.worker?.maxConcurrent ?? 4;
     const reviewerCap = run.roles.reviewer?.maxConcurrent ?? 2;
 
+    // Concurrency is bounded by the role cap AND by file overlap: two tasks
+    // whose filesHint intersect must never run at the same time, however
+    // high the cap is. Every not-yet-merged task that has started work
+    // occupies its files (its branch holds unmerged edits until `done`).
+    const occupiedFiles = new Set();
+    for (const t of tasks) {
+      if (['spawning', 'in_progress', 'needs_review', 'reviewing', 'changes_requested', 'approved', 'merging'].includes(t.status)) {
+        for (const f of t.filesHint || []) occupiedFiles.add(proto.normalizeFileHint(f));
+      }
+    }
+    const overlapsOccupied = (t) => (t.filesHint || []).some(f => occupiedFiles.has(proto.normalizeFileHint(f)));
+    const occupy = (t) => { for (const f of t.filesHint || []) occupiedFiles.add(proto.normalizeFileHint(f)); };
+
     if (policy.autoSpawnWorkers) {
-      // Rework first — those tasks are closest to completion.
+      // Rework first — those tasks are closest to completion (their files
+      // are already counted as occupied by themselves).
       for (const t of tasks.filter(x => x.status === 'changes_requested' && leaf(x))) {
         if (activeWorkers >= workerCap) break;
         if (await this._dispatchRework(projectPath, run, policy, t)) { activeWorkers++; acted = true; }
@@ -140,6 +154,10 @@ class OrchSpawner {
         .sort((a, b) => a.id.localeCompare(b.id));
       for (const t of ready) {
         if (!proto.depsSatisfied(t, byId)) continue;
+        if (overlapsOccupied(t)) {
+          this.log.debug(`[orch] ${run.id}/${t.id} deferred: files overlap an active task`);
+          continue;
+        }
         if ((t.attempts || 0) >= policy.maxAttempts) {
           const r = proto.transitionTask(projectPath, run.id, t.id, 'ready', 'blocked',
             { blockedReason: `max attempts (${policy.maxAttempts}) exhausted` });
@@ -150,7 +168,11 @@ class OrchSpawner {
           continue;
         }
         if (activeWorkers >= workerCap) break;
-        if (await this._dispatchWorker(projectPath, run, policy, t)) { activeWorkers++; acted = true; }
+        if (await this._dispatchWorker(projectPath, run, policy, t)) {
+          activeWorkers++;
+          acted = true;
+          occupy(t);
+        }
       }
     }
 
@@ -482,6 +504,11 @@ class OrchSpawner {
   }
 
   _queueNudgeLine(projectPath, runId, line) {
+    // Nudge lines embed agent-written text (blockedReason, failReason) and
+    // are typed into the master's PTY — control characters here would let a
+    // rogue/buggy task file inject extra submitted prompts into the master
+    // session. Strip them and cap the length.
+    line = String(line).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
     const key = projectPath + ' ' + runId;
     let q = this._nudgeQueues.get(key);
     if (!q) {

@@ -136,7 +136,18 @@ function validateTask(task) {
       if (typeof d !== 'string' || !TASK_ID_RE.test(d)) return `invalid dependency: ${d}`;
     }
   }
+  if (task.filesHint !== undefined) {
+    if (!Array.isArray(task.filesHint) || task.filesHint.some(f => typeof f !== 'string')) {
+      return 'filesHint must be an array of strings';
+    }
+  }
   return null;
+}
+
+// Canonical form for overlap comparison: case- and separator-insensitive,
+// so "src\A.js" and "src/a.js" count as the same file.
+function normalizeFileHint(f) {
+  return String(f).replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
 }
 
 // --- reading --------------------------------------------------------------
@@ -369,7 +380,7 @@ module.exports = {
   DEFAULT_POLICY,
   orchDir, runsRoot, runDir, worktreesRoot,
   readJsonSafe, writeJsonAtomic,
-  validateRun, validateTask,
+  validateRun, validateTask, normalizeFileHint,
   listRunIds, readRun, readTasks, readTasksDetailed, readTask, readEvents,
   writeRun, writeTask, appendEvent,
   isTransitionAllowed, transitionTask,

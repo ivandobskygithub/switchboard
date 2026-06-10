@@ -112,6 +112,11 @@ repo-wide context:
   spec, the files it touches and the guidelines.
 - **Disjoint files.** Tasks that run in parallel must not touch the same
   files. If two tasks must touch one file, add a dependsOn edge between them.
+- **Always fill \`filesHint\`** with every file the task is expected to touch.
+  Switchboard enforces it mechanically: a ready task whose filesHint overlaps
+  any unmerged in-flight task is deferred, so accurate hints are what make
+  high parallelism safe. A task with an empty filesHint is assumed to
+  conflict with nothing — only leave it empty when that is genuinely true.
 - **Real seams over mocks.** Prefer designs that need no mocking; when test
   doubles are unavoidable, the spec must say exactly what to fake and how.
 - **Explicit acceptance criteria** that the worker can verify itself (tests
