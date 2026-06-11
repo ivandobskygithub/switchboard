@@ -1,4 +1,5 @@
 const path = require('path');
+const { hasSubmitChars } = require('./submit-chars');
 
 const UUID_RE = /^[0-9a-fA-F-]{8,64}$/;
 const WORKTREE_RE = /^[A-Za-z0-9_.\-\/]{1,128}$/;
@@ -59,6 +60,22 @@ function buildClaudeCmd({ sessionId, isNew, sessionOptions, tmpPromptPath }) {
 
   if (sessionOptions?.appendSystemPrompt && tmpPromptPath) {
     cmd += ` --append-system-prompt "$(cat ${shq(tmpPromptPath)})"`;
+  }
+
+  // Initial prompt typed for the user at session start (Agent Teams uses
+  // this to boot workers with `/sb-work <task>`). Positional arg, so it must
+  // come last. Single-quote escaping handles arbitrary content; cap length
+  // to keep the command line sane.
+  if (sessionOptions?.initialPrompt) {
+    const prompt = String(sessionOptions.initialPrompt);
+    if (prompt.length > 8192) return { ok: false, error: 'initialPrompt too long' };
+    // Reject control chars (allowing \t and \n) plus the Unicode line/
+    // paragraph separators and NEL that some terminals submit as Enter — so
+    // an agent-derived initialPrompt can't smuggle an extra submitted line.
+    if (hasSubmitChars(prompt, { allowTab: true, allowNewline: true })) {
+      return { ok: false, error: 'initialPrompt contains control characters' };
+    }
+    cmd += ` ${shq(prompt)}`;
   }
 
   if (sessionOptions?.preLaunchCmd) {

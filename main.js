@@ -918,6 +918,7 @@ ipcMain.handle('delete-setting', (_event, key) => {
 
 // --- Scheduled tasks ---
 const scheduleIpc = require('./schedule-ipc');
+let orchModule = null; // Agent Teams orchestration (initialized in app.whenReady)
 
 const SETTING_DEFAULTS = {
   permissionMode: null,
@@ -1024,7 +1025,13 @@ ipcMain.handle('archive-session', (_event, sessionId, archived) => {
 });
 
 // --- IPC: open-terminal ---
-ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, sessionOptions) => {
+// The body lives in openTerminalImpl so the Agent Teams orchestrator
+// (orch-ipc.js / orch-spawner.js) can spawn sessions through the exact same
+// path the renderer uses — profiles, MCP, OSC parsing and all.
+ipcMain.handle('open-terminal', (_event, sessionId, projectPath, isNew, sessionOptions) =>
+  openTerminalImpl(sessionId, projectPath, isNew, sessionOptions));
+
+async function openTerminalImpl(sessionId, projectPath, isNew, sessionOptions) {
   if (!mainWindow) return { ok: false, error: 'no window' };
 
   // Reattach to existing session
@@ -1367,7 +1374,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
   }
 
   return { ok: true, reattached: false, mcpActive: !!mcpServer };
-});
+}
 
 // --- IPC: terminal-input (fire-and-forget) ---
 ipcMain.on('terminal-input', (_event, sessionId, data) => {
@@ -1786,6 +1793,56 @@ app.whenReady().then(() => {
   }
 
   scheduleIpc.init(log, runScheduleCommand);
+
+  // Agent Teams asset pack: install /sb-* commands into ~/.claude so they
+  // resolve in every session Switchboard spawns — including worktree
+  // sessions, whose checkouts don't contain the project's .claude/commands.
+  try { require('./orch-bootstrap').ensureClaudeAssets({ log }); } catch (err) {
+    log.error(`[orch] bootstrap failed: ${err.message}`);
+  }
+
+  // Agent Teams orchestration: watcher + spawner + IPC. Sessions spawned by
+  // the orchestrator go through openTerminalImpl, so they behave exactly
+  // like user-opened terminals (profiles, buffering, busy detection).
+  const orchIpc = require('./orch-ipc');
+  orchModule = orchIpc.init(log, {
+    openTerminal: openTerminalImpl,
+    sendInput: (sessionId, text) => {
+      const session = activeSessions.get(sessionId);
+      if (!session || session.exited) return false;
+      try { session.pty.write(text); return true; } catch { return false; }
+    },
+    isSessionActive: (sessionId) => {
+      const session = activeSessions.get(sessionId);
+      return !!session && !session.exited;
+    },
+    isSessionBusy: (sessionId) => !!activeSessions.get(sessionId)?._cliBusy,
+    getMainWindow: () => mainWindow,
+    // Phase-gate runner: execute a project's validation command in the
+    // integration worktree via the user's shell, capped at 10 minutes.
+    runValidation: (cmd, cwd) => new Promise((resolve) => {
+      try {
+        const globalSettings = getSetting('global') || {};
+        const profileId = globalSettings.shellProfile || SETTING_DEFAULTS.shellProfile;
+        const profile = resolveShell(profileId);
+        if (!profile || !profile.path) {
+          resolve({ ok: false, code: -1, stdout: '', stderr: 'no shell available to run the gate' });
+          return;
+        }
+        const child = cpSpawn(profile.path, shellArgs(profile.path, cmd, profile.args || []), {
+          cwd, env: { ...cleanPtyEnv, FORCE_COLOR: '0' }, windowsHide: true, timeout: 600_000,
+        });
+        let stdout = '', stderr = '';
+        child.stdout?.on('data', d => { stdout += d.toString(); });
+        child.stderr?.on('data', d => { stderr += d.toString(); });
+        child.on('exit', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+        child.on('error', (err) => resolve({ ok: false, code: -1, stdout, stderr: stderr + err.message }));
+      } catch (err) {
+        resolve({ ok: false, code: -1, stdout: '', stderr: err.message });
+      }
+    }),
+  });
+
   profilesModule.init(log);
   sessionProfiles.init(log);
   analyticsModule.init(log, () => mainWindow);
@@ -1811,6 +1868,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  // Stop orchestration watchers/spawner
+  if (orchModule) { try { orchModule.dispose(); } catch {} orchModule = null; }
+
   // Shut down all MCP servers
   shutdownAllMcp();
 
